@@ -550,7 +550,7 @@ def generate_with_saber(model, prompt,n = 2, gen_length=256, block_length=256, t
                 if num_to_remask > fix_list[j]-1:
                     num_to_remask = fix_list[j]-1
 
-                _, remove_index = torch.topk(delta_for_removal[j], k=num_to_remask, largest=False)  # 找到置信度最低的索引
+                _, remove_index = torch.topk(delta_for_removal[j], k=num_to_remask, largest=False) 
                 x[j, remove_index] = mask_id  
                 initial_confidence[j, remove_index] = 0.0
                 global_transfer_index[j, remove_index] = False
