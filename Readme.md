@@ -1,5 +1,5 @@
 # Saber: An Efficient Sampling with Adaptive Acceleration and Backtracking Enhanced Remasking for Diffusion Language Model
-[![arXiv](https://img.shields.io/badge/arXiv-2410.02675-b31b1b.svg)](https://arxiv.org/abs/2410.02675)
+[![arXiv](https://img.shields.io/badge/arXiv-2510.18165-b31b1b.svg)](https://arxiv.org/abs/2510.18165)
 
 Our work introduces Saber, a training-free sampling algorithm for diffusion language models that enhances code generation by adaptively accelerating inference and incorporating backtracking, thereby improving output quality and speed while narrowing the performance gap with autoregressive models.
 
