@@ -58,6 +58,7 @@ def top_k_logits(logits, top_k=None):
 
 def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confidence=False, neg_entropy=False):
     original_dtype = logits.dtype
+    orig_logits = logits.clone()
     logits = logits.to(torch.float32)
     if temperature > 0:
         logits = logits / temperature
@@ -66,6 +67,8 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
     if top_k is not None:
         logits = top_k_logits(logits, top_k)
     probs = torch.softmax(logits, dim=-1)
+    orig_probs = torch.softmax(orig_logits, dim=-1)
+    zero_temp_confidence, zero_temp_x0 = orig_probs.max(dim=-1)
 
     if temperature > 0:
         x0 = dists.Categorical(probs=probs).sample()
@@ -86,7 +89,7 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
         log_probs = torch.log(probs + epsilon)
         confidence = torch.sum(probs * log_probs, dim=-1)
 
-    return confidence.to(original_dtype), x0
+    return confidence.to(original_dtype), x0, zero_temp_confidence.to(original_dtype)
 
 
 @dataclass
@@ -100,7 +103,7 @@ class DreamGenerationConfig(GenerationConfig):
         self.temperature: float = kwargs.pop("temperature", 0.0)
         self.top_p: Optional[float] = kwargs.pop("top_p", None)
         self.top_k: Optional[int] = kwargs.pop("top_k", None)
-        self.max_length = kwargs.pop("max_length", 20)
+        self.max_length = kwargs.pop("max_length", 512)
         self.max_new_tokens = kwargs.pop("max_new_tokens", None)
         # diffusion specific params
         self.eps: float = kwargs.pop("eps", 1e-3)
@@ -383,10 +386,12 @@ class DreamGenerationMixin:
         top_p = generation_config.top_p
         top_k = generation_config.top_k
         eos_penalty = generation_config.eos_penalty
-
+        
+        print("temperature:", temperature)
         histories = [] if (return_dict_in_generate and output_history) else None
 
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
+        #print("x shape:", x.shape)
         prompt_len = input_ids.shape[1]
         is_prompt_mask = torch.zeros_like(x, dtype=torch.bool)
         is_prompt_mask[:, :prompt_len] = True
@@ -427,11 +432,11 @@ class DreamGenerationMixin:
                     mask_logits[:, pad_token_id] += eos_penalty * torch.log(1 - t + eps)
 
             if mask_logits.numel() > 0:
-                confidence, x0 = sample_tokens(mask_logits, temperature=temperature, top_p=top_p, top_k=top_k)
+                confidence, x0 ,zero_temp_confidence= sample_tokens(mask_logits, temperature=temperature, top_p=top_p, top_k=top_k)
             else:
                 confidence = torch.tensor([], device=x.device, dtype=torch.float32)
                 x0 = torch.tensor([], device=x.device, dtype=torch.long)
-
+            confidence = zero_temp_confidence
             # restore sampled results into full-shape tensors
             confidence_full = torch.full(x.shape, float("-inf"), device=x.device, dtype=confidence.dtype)
             candidate_tokens = torch.full(x.shape, mask_token_id, device=x.device, dtype=torch.long)
@@ -439,18 +444,19 @@ class DreamGenerationMixin:
                 confidence_full[mask_index] = confidence
                 candidate_tokens[mask_index] = x0
 
+            #print("confidence:", confidence_full)
             selected_mask = torch.zeros_like(mask_index, dtype=torch.bool)  # positions to unmask this step
 
             for b in range(B):
                 mask_pos = torch.where(mask_index[b] & ~is_prompt_mask[b])[0]  # positions that are currently masked
                 num_mask_pos = mask_pos.numel()
                 # build threshold from previously unmasked tokens' first_conf (ever unmasked)
-                prev_first = first_conf[b][~torch.isnan(first_conf[b])]  # 1D tensor of previously recorded first confidences
+                prev_first  = first_conf[b][~torch.isnan(first_conf[b])]  # 1D tensor of previously recorded first confidences
                 if prev_first.numel() > 0:
                     threshold = float(prev_first.mean().item())
                 else:
-                    threshold = 1.0 
-
+                    threshold = 1.0
+                #print(threshold)
                 if num_mask_pos > 0:
                     confidences_b = confidence_full[b, mask_pos] 
                     # selected by threshold (strictly greater as requested)
@@ -459,8 +465,6 @@ class DreamGenerationMixin:
 
                     if sel_indices.numel() < 2:
                         k = min(2, num_mask_pos)
-                        # topk on confidences_b
-                        # if num_mask_pos < k, topk will handle
                         _, topk_idx = torch.topk(confidences_b, k=min(k, confidences_b.numel()))
                         sel_indices = mask_pos[topk_idx]
 
@@ -479,7 +483,7 @@ class DreamGenerationMixin:
                     # assign first_conf from confidence_full (float)
                     first_conf[need_record] = confidence_full[need_record].to(dtype=first_conf.dtype)
             if not (x == mask_token_id).any():
-                print(f"All tokens generated at step {step_id}")
+                #print(f"All tokens generated at step {step_id}")
                 break
             current_unmasked_mask = (x != mask_token_id)
 

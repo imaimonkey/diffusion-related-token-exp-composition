@@ -86,7 +86,7 @@ def build_test_method(test_list, test_imports, method_name):
         test_method += '\t' + test + "\n"
     return test_method.strip("\n")
 
-def process_humaneval_test(sample, problems, example_test=False, is_mbpp=False, is_humaneval_et=False, language="python"):
+def process_humaneval_test(sample, problems, example_test=False, is_mbpp=False, language="python"):
     """
     Processes a sample for evaluation.
     """
@@ -94,12 +94,6 @@ def process_humaneval_test(sample, problems, example_test=False, is_mbpp=False, 
     if is_mbpp:
         # return sample["generation"] + "\n" + "\n".join(problems[task_id]["test"])
         return sample["completion"] + "\n" + "\n".join(problems[task_id]["test_list"])
-    elif is_humaneval_et:
-        generation = problems[task_id]["prompt"] + sample["completion"]
-        method_name = find_method_name(generation) if find_method_name(generation) else "candidate"
-        test = build_test_method(problems[task_id]["test_case_list"], "", method_name)
-        #print(test)
-        return generation + "\n" +  test
     else:
         #print( problems[task_id]["test"])
         return problems[task_id]["prompt"] + sample["completion"]  +  problems[task_id]["test"]
@@ -133,7 +127,6 @@ def evaluate_functional_correctness(
         test_groundtruth: bool = False,
         example_test: bool = False,
         is_mbpp: bool = False,
-        is_humaneval_et: bool = False,
         language: str = "python",
 ):
     """
@@ -145,8 +138,6 @@ def evaluate_functional_correctness(
     problems = read_dataset(problem_file,
                             dataset_type="humaneval")
     sample_jsonl = stream_jsonl_all(input_file)
-    print(f"Loaded {problem_file} problems.")
-    print(f"Loaded {problems['HumanEval/0']['test']}")
 
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -185,7 +176,7 @@ def evaluate_functional_correctness(
                     lang = "python"
                 tmp_dir_ = os.path.join(tmp_dir, lang, "evaluation")
                 sample["task_id"] = task_id
-                sample["test_code"] = process_humaneval_test(sample, problems, example_test, is_mbpp, is_humaneval_et, language)
+                sample["test_code"] = process_humaneval_test(sample, problems, example_test, is_mbpp, language)
                 #print("testcode",sample["test_code"])
                 if sample["test_code"] is None:
                     continue
@@ -213,7 +204,6 @@ def evaluate_functional_correctness(
             all_results.append(result)
             completion_id_ = result["completion_id"]
             passed = result["passed"]
-            status = "✓ PASS" if passed else "✗ FAIL"
             
             #print(f"Task: {task_id}, Completion: {completion_id_}, Result: {status}")
 

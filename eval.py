@@ -14,6 +14,7 @@ import dataset_utils
 import tempfile
 from dataset_utils.eval_correctness_mbpp.evaluation import evaluate_functional_correctness
 from dataset_utils.eval_humaneval.all_evaluate import evaluate_solution, evaluate_solution_et
+import datetime
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def main():
@@ -54,6 +55,8 @@ def run_single_task_evaluation(config, model, tokenizer):
     extract_answer_fn = getattr(dataset_utils, dataset_cfg.get('extract_answer_fn')) if dataset_cfg.get('extract_answer_fn') else None
     
     gen_cfg = config['generation_args']
+    # 从gen_cfg中获取num_samples并保存到单独变量
+    num_samples = gen_cfg.pop('num_samples', 1)  # 使用pop移除该参数，避免传递给生成函数
     method_name = config['method']
     method_params = config.get('method_args', {}).get(method_name, {})
     generation_fn = get_generation_function(method_name)
@@ -94,28 +97,31 @@ def run_single_task_evaluation(config, model, tokenizer):
         context, gt_doc, trailing_prompt = doc_to_text_fn(doc)
         prompt = tokenizer.apply_chat_template(context, add_generation_prompt=True, tokenize=False) + trailing_prompt
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
-
-        if method_name == 'remdm':
-            gen_output, steps = generate_with_remdm(model, input_ids, gen_length=256, init_unmask_ratio=0.875, unmask_k=1, loop_steps=32, temperature=0., cfg_scale=0., remasking='low_confidence', mask_id=126336, tokenizer=tokenizer, block_length=128)
-        else:
-            gen_output, steps = generation_fn(model, input_ids,**gen_cfg, **method_params)
-        gen_str = tokenizer.batch_decode(gen_output[:, input_ids.shape[1]:], skip_special_tokens=True)[0]
         
-        total_steps += steps
-        
-        result_item = {'completion':'', 'full_response': gen_str, 'steps': steps,'index': i}
-
-        if dataset_name == 'mbpp':
-            gen_str = f"```python\n" + gen_str
-            gen_code = extract_answer_fn(gen_str, doc['entry_point'])
-            result_item['completion'] = gen_code
-        else:
-            result_item['completion'] = extract_answer_fn(gen_str, doc)
-        if 'task_id' in gt_doc: result_item['task_id'] = gt_doc['task_id']
-        #if 'prompt' in gt_doc: result_item['prompt'] = gt_doc['prompt']
-        if 'question_id' in gt_doc: result_item["question_id"] = gt_doc["question_id"]
+        # 为每个样本生成num_samples个结果
+        for sample_idx in range(num_samples):
+            if method_name == 'remdm':
+                gen_output, steps = generate_with_remdm(model, input_ids, gen_length=256, init_unmask_ratio=0.875, unmask_k=1, loop_steps=32, temperature=0., cfg_scale=0., remasking='low_confidence', mask_id=126336, tokenizer=tokenizer, block_length=128)
+            else:
+                gen_output, steps = generation_fn(model, input_ids,**gen_cfg, **method_params)
+            gen_str = tokenizer.batch_decode(gen_output[:, input_ids.shape[1]:], skip_special_tokens=True)[0]
             
-        raw_outputs.append(result_item)
+            total_steps += steps
+            
+            # 为每个结果项添加sample_idx，确保唯一性
+            result_item = {'completion':'', 'full_response': gen_str, 'steps': steps, 'index': i, 'sample_idx': sample_idx}
+
+            if dataset_name == 'mbpp':
+                gen_str = f"```python\n" + gen_str
+                gen_code = extract_answer_fn(gen_str, doc['entry_point'])
+                result_item['completion'] = gen_code
+            else:
+                result_item['completion'] = extract_answer_fn(gen_str, doc)
+            if 'task_id' in gt_doc: result_item['task_id'] = gt_doc['task_id']
+            #if 'prompt' in gt_doc: result_item['prompt'] = gt_doc['prompt']
+            if 'question_id' in gt_doc: result_item["question_id"] = gt_doc["question_id"]
+                
+            raw_outputs.append(result_item)
     
     final_metrics = {}
     final_metrics_et = None
@@ -127,22 +133,30 @@ def run_single_task_evaluation(config, model, tokenizer):
             for item in raw_outputs:
                 temp_f.write(json.dumps(item) + "\n")
                 temp_file_path = temp_f.name
+        
+        # 计算pass@k，其中k的最大值为num_samples
+        k_values = [1]
+        if num_samples > 1:
+            k_values.append(num_samples)  # 添加pass@num_samples
+        
         if dataset_name == 'humaneval':
             problem_file = config['dataset_config'].get('problem_file', "./data/humaneval/HumanEval.jsonl")
             problem_file_et = config['dataset_config'].get('problem_file_et', './data/humaneval/HumanEval_ET.jsonl')
-            final_metrics = evaluate_solution(raw_outputs,problem_file=problem_file)
+            # 传递k_values参数以计算多个pass@k指标
+            final_metrics = evaluate_solution(raw_outputs, problem_file=problem_file, save_path=None, k=k_values)
             print(f"ET Evaluation...{problem_file_et}")
-            final_metrics_et = evaluate_solution_et(raw_outputs,problem_file=problem_file_et)
+            final_metrics_et = evaluate_solution_et(raw_outputs, problem_file=problem_file_et, k=k_values)
         elif dataset_name == 'mbpp':
             problem_file = config['dataset_config'].get('problem_file', "./data/mbpp/mbpp_sanitized.jsonl")
             problem_file_et = config['dataset_config'].get('problem_file_et', "./data/mbpp/MBPP_ET.jsonl")
-            final_metrics = evaluate_functional_correctness(temp_file_path,problem_file=problem_file,is_mbpp=True)
-            final_metrics_et = evaluate_functional_correctness(temp_file_path,problem_file=problem_file_et,is_mbpp=True)
+            # 传递k参数以计算多个pass@k指标
+            final_metrics = evaluate_functional_correctness(temp_file_path, problem_file=problem_file, is_mbpp=True, k=k_values)
+            final_metrics_et = evaluate_functional_correctness(temp_file_path, problem_file=problem_file_et, is_mbpp=True, k=k_values)
         elif dataset_name == 'livecodebench':
             problem_file = config['dataset_config'].get('problem_file', 'default')
         os.unlink(temp_file_path)
     external_metrics = final_metrics
-    output_path = f"./results/{config['dataset_name']}_{method_name}.jsonl"
+    output_path = f"./results/{config['dataset_name']}_{method_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl.jsonl"
     print(f"Results saved in .jsonl format to {output_path}")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
@@ -154,16 +168,18 @@ def run_single_task_evaluation(config, model, tokenizer):
         print(f"Dataset: {config['dataset_name']}")
         print(f"Method: {method_name}")
         if external_metrics:
-            accuracy = external_metrics['pass@1']
+            for k, v in external_metrics.items():
+                print(f"{k}: {v:.4f}")
         else:
             print("Accuracy: N/A (no external metrics available)")
-        print(f"Accuracy: {accuracy:.4f}" if isinstance(accuracy, float) else f"Accuracy: {accuracy}")
 
         if final_metrics_et is not None:
             print("\n--- ET Evaluation Summary ---")
-            print(f"Accuracy_et: {final_metrics_et['pass@1']:.4f}")
+            for k, v in final_metrics_et.items():
+                print(f"{k}_et: {v:.4f}")
         avg_steps = total_steps / total_len if total_len > 0 else 0
         print(f"Average Steps: {avg_steps:.2f}")
+        print(f"Number of samples per problem: {num_samples}")
 
 
 if __name__ == "__main__":

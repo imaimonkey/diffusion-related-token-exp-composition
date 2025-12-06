@@ -11,7 +11,13 @@ from .execute.execution import evaluate_with_test_code, evaluate_with_test_code_
 from .evaluation import pass_at_K, AvgPassRatio
 from datasets import load_dataset, load_from_disk
 
-def evaluate_solution(generation_list, problem_file, dataset_type='humaneval', lang='python', timeout=10):
+def save_raw_exec_result_to_jsonl(exec_result, out_path):
+    with open(out_path, "w", encoding="utf-8") as f:
+        for item in exec_result:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    print(f"Saved raw execution results to {out_path}")
+    
+def evaluate_solution(generation_list, problem_file, dataset_type='humaneval', lang='python', timeout=10, save_path=None, k=[1]):
 
     if dataset_type == 'humaneval':
         with open(problem_file, 'r') as f:
@@ -33,12 +39,13 @@ def evaluate_solution(generation_list, problem_file, dataset_type='humaneval', l
         solution["completion"] = solution["generation"]
     
     exec_result = evaluate_with_test_code(handled_solutions, timeout=timeout)
+    if save_path:
+        save_raw_exec_result_to_jsonl(exec_result, save_path)
+    pass_at_k_result = pass_at_K(exec_result, k=k)
+    print(f"Pass@k with extended test cases: {pass_at_k_result}")
+    return pass_at_k_result
 
-    pass_at_1_result = pass_at_K(exec_result, k=[1])
-    print(f"Pass@1 with extended test cases: {pass_at_1_result}")
-    return pass_at_1_result
-
-def evaluate_solution_et(generation_list, problem_file, dataset_type='humaneval', lang='python', timeout=10):
+def evaluate_solution_et(generation_list, problem_file, dataset_type='humaneval', lang='python', timeout=10, k=[1]):
 
     if dataset_type == 'humaneval':
         with open(problem_file, 'r') as f:
@@ -68,8 +75,8 @@ def evaluate_solution_et(generation_list, problem_file, dataset_type='humaneval'
     
     exec_result_T = evaluate_with_test_code(handled_solutions, timeout=timeout)
     
-    pass_at_1_result = pass_at_K(exec_result_T, k=[1])
+    pass_at_k_result = pass_at_K(exec_result_T, k=k)
     
-    print(f"Pass@1 with extended test cases: {pass_at_1_result}")
-    return pass_at_1_result
+    print(f"Pass@k with extended test cases: {pass_at_k_result}")
+    return pass_at_k_result
 

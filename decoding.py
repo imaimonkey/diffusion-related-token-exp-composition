@@ -468,7 +468,7 @@ def decoding_wino(model, prompt, gen_length=256, block_length=256, temperature=0
     return x_block[:, :prompt.shape[1] + gen_length], step
 
 @torch.no_grad()
-def generate_with_saber(model, prompt,n = 2, gen_length=256, block_length=256, temperature=0., mask_id=126336):
+def generate_with_saber(model, prompt,n = 2,mu = 8, gen_length=256, block_length=256, temperature=0., mask_id=126336):
 
     step = 0
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
@@ -483,6 +483,7 @@ def generate_with_saber(model, prompt,n = 2, gen_length=256, block_length=256, t
     last_confidence = torch.zeros_like(x, dtype=torch.float32, device=x.device)
     for num_block in range(num_blocks):
         block_end = prompt.shape[1] + (num_block + 1) * block_length
+        block_start = prompt.shape[1] + num_block * block_length
         for i in range(1024):
 
             step += 1
@@ -507,6 +508,7 @@ def generate_with_saber(model, prompt,n = 2, gen_length=256, block_length=256, t
             fix_list = []
             for j in range(confidence.shape[0]):
                 block_final_confidence = final_confidence[j, :block_end]
+                #block_final_confidence = final_confidence[j, block_start:block_end] 
                 generated_probs = block_final_confidence[block_final_confidence > -np.inf]
                 if generated_probs.numel() > 0:
                     threshold = generated_probs.mean()
@@ -545,16 +547,15 @@ def generate_with_saber(model, prompt,n = 2, gen_length=256, block_length=256, t
             delta_for_removal[prompt_index] = float('inf')
 
             for j in range(delta_for_removal.shape[0]):
-                num_to_remask = max(int(n/2),(fix_list[j] + 7) // 8)
+                num_to_remask = max(int(n/2),(fix_list[j] + mu-1) // mu)
 
                 if num_to_remask > fix_list[j]-1:
                     num_to_remask = fix_list[j]-1
 
-                _, remove_index = torch.topk(delta_for_removal[j], k=num_to_remask, largest=False)  # 找到置信度最低的索引
+                _, remove_index = torch.topk(delta_for_removal[j], k=num_to_remask, largest=False)  
                 x[j, remove_index] = mask_id  
                 initial_confidence[j, remove_index] = 0.0
                 global_transfer_index[j, remove_index] = False
-    
     return x, step
 
 def get_num_transfer_tokens(mask_index, steps):

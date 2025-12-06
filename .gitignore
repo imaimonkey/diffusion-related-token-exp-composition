@@ -6,6 +6,8 @@ __pycache__/
 
 *.log
 *.jsonl
+*.yaml
+
 
 data/livecodebench/
 results/
