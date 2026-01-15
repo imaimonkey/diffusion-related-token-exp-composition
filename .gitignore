@@ -3,11 +3,18 @@ __pycache__/
 *$py.class
 
 .vscode/
+.venv/
 
 *.log
 *.jsonl
 *.yaml
+*.out
+*.err
 
 
 data/livecodebench/
 results/
+logs/
+
+# Optional local checkout (contains its own .git)
+opencompass/

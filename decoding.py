@@ -23,14 +23,14 @@ def entropy_function(probabilities):
 
 @ torch.no_grad()
 def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336):
+             cfg_scale=0., remasking='low_confidence', mask_id=126336, attention_mask=None):
     '''
     Default decoding function from LLaDA paper
     '''
     '''
     Args:
         model: Mask predictor.
-        prompt: A tensor of shape (1, L).
+        prompt: A tensor of shape (B, L).
         steps: Sampling steps, less than or equal to gen_length.
         gen_length: Generated answer length.
         block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
@@ -38,8 +38,9 @@ def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256,
         cfg_scale: Unsupervised classifier-free guidance scale.
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
+        attention_mask: Optional attention mask for the full sequence, expected shape (B, 1, T, T).
     '''
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
     prompt_index = (x != mask_id)
@@ -59,12 +60,16 @@ def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256,
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_).logits
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                else:
+                    attention_mask_ = None
+                logits = model(x_, attention_mask=attention_mask_).logits
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
                 #logits = model(x, attention_mask=attention_mask, position_ids=position_ids).logits
-                logits = model(x).logits
+                logits = model(x, attention_mask=attention_mask).logits
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
@@ -260,8 +265,8 @@ def generate_with_remdm(model, prompt, gen_length=256, init_unmask_ratio=0.875, 
 
 @torch.no_grad()
 def generate_with_entropy(model, prompt, steps=256, gen_length=256, block_length=256, temperature=0.,
-                            cfg_scale=0., remasking='low_confidence', mask_id=126336, return_order=False):
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+                            cfg_scale=0., remasking='low_confidence', mask_id=126336, return_order=False, attention_mask=None):
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
     if return_order:
         orders = {}
@@ -283,11 +288,15 @@ def generate_with_entropy(model, prompt, steps=256, gen_length=256, block_length
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_).logits
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                else:
+                    attention_mask_ = None
+                logits = model(x_, attention_mask=attention_mask_).logits
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x).logits
+                logits = model(x, attention_mask=attention_mask).logits
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
@@ -320,8 +329,8 @@ def generate_with_entropy(model, prompt, steps=256, gen_length=256, block_length
 
 @torch.no_grad()
 def generate_with_margin(model, prompt, steps=256, gen_length=256, block_length=256, temperature=0.,
-                            cfg_scale=0., remasking='low_confidence', mask_id=126336, return_order=False):
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+                            cfg_scale=0., remasking='low_confidence', mask_id=126336, return_order=False, attention_mask=None):
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
     if return_order:
         orders = {}
@@ -343,11 +352,15 @@ def generate_with_margin(model, prompt, steps=256, gen_length=256, block_length=
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_).logits
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                else:
+                    attention_mask_ = None
+                logits = model(x_, attention_mask=attention_mask_).logits
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x).logits
+                logits = model(x, attention_mask=attention_mask).logits
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)  # b, l
@@ -468,10 +481,10 @@ def decoding_wino(model, prompt, gen_length=256, block_length=256, temperature=0
     return x_block[:, :prompt.shape[1] + gen_length], step
 
 @torch.no_grad()
-def generate_with_saber(model, prompt,n = 2,mu = 8, gen_length=256, block_length=256, temperature=0., mask_id=126336):
+def generate_with_saber(model, prompt,n = 2,mu = 8, gen_length=256, block_length=256, temperature=0., mask_id=126336, attention_mask=None):
 
     step = 0
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
     prompt_index = (x != mask_id)
     mask_index = (x == mask_id) 
@@ -487,7 +500,7 @@ def generate_with_saber(model, prompt,n = 2,mu = 8, gen_length=256, block_length
         for i in range(1024):
 
             step += 1
-            logits = model(x).logits
+            logits = model(x, attention_mask=attention_mask).logits
             
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1) 
@@ -677,4 +690,3 @@ def get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, nu
         transfer_index[j, select_index] = True
 
     return x0, transfer_index
-

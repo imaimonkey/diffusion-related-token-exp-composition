@@ -1267,14 +1267,24 @@ class LLaDAModel(nn.Module):
         #     attention_mask = None
             
         if attention_mask is not None:
-            # hf: only support 2D attention mask
-            assert attention_mask.shape == (batch_size, 1, seq_len, seq_len + past_length)
-            # if not torch.bool, convert to torch.bool
-            if attention_mask.dtype != torch.bool:
-                # assert all values are 0 or 1
-                assert torch.all(attention_mask == 0) or torch.all(attention_mask == 1)
-                # convert to torch.bool
-                attention_mask = attention_mask.to(dtype=torch.bool)
+            # Support common HuggingFace-style 2D attention masks as well as 4D SDPA masks.
+            # For MDM in this repo, KV cache is disabled so `past_length` is always 0.
+            if attention_mask.dim() == 2:
+                assert attention_mask.shape == (batch_size, seq_len)
+                if attention_mask.dtype != torch.bool:
+                    assert torch.all((attention_mask == 0) | (attention_mask == 1))
+                    attention_mask = attention_mask.to(dtype=torch.bool)
+                # SDPA supports masks broadcastable to (B, n_heads, T, S). This masks keys only.
+                attention_mask = attention_mask[:, None, None, :]
+            elif attention_mask.dim() == 4:
+                # Accept a pre-built SDPA mask. We only sanity-check the batch and key length.
+                assert attention_mask.shape[0] == batch_size
+                assert attention_mask.shape[-1] == seq_len + past_length
+                if attention_mask.dtype != torch.bool:
+                    assert torch.all((attention_mask == 0) | (attention_mask == 1))
+                    attention_mask = attention_mask.to(dtype=torch.bool)
+            else:
+                raise ValueError("attention_mask must be 2D (B, T) or 4D (B, 1, T, S)")
         if position_ids is None:
             # from past_length to past_length + seq_len
             position_ids = torch.arange(past_length, past_length + seq_len, dtype=torch.long, device=x.device)
