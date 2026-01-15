@@ -15,6 +15,3 @@ __pycache__/
 data/livecodebench/
 results/
 logs/
-
-# Optional local checkout (contains its own .git)
-opencompass/
