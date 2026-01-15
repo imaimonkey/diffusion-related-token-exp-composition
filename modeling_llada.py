@@ -421,15 +421,26 @@ class RotaryEmbedding(nn.Module):
             pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
             pos_sin = pos_sin.type_as(q_)
             pos_cos = pos_cos.type_as(q_)
-            q_ = self.apply_rotary_pos_emb(
-                # pos_sin[:, :, key_len - query_len : key_len, :],
-                # pos_cos[:, :, key_len - query_len : key_len, :],
-                pos_sin[:, :, position_ids, :],
-                pos_cos[:, :, position_ids, :],
-                q_,
-            )
-            # k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
-            k_ = self.apply_rotary_pos_emb(pos_sin[:, :, position_ids, :], pos_cos[:, :, position_ids, :], k_)
+
+            if position_ids.dim() == 1:
+                pos_sin_sel = pos_sin[:, :, position_ids, :]
+                pos_cos_sel = pos_cos[:, :, position_ids, :]
+            elif position_ids.dim() == 2:
+                # position_ids: (B, T). Select RoPE embeddings per sample without changing tensor rank semantics.
+                B, T = position_ids.shape
+                if T != query_len:
+                    raise ValueError("position_ids shape must match sequence length")
+                position_ids_flat = position_ids.reshape(-1)
+                pos_sin_base = pos_sin[0, 0]  # (key_len, hs)
+                pos_cos_base = pos_cos[0, 0]
+                hs = pos_sin_base.shape[-1]
+                pos_sin_sel = pos_sin_base.index_select(0, position_ids_flat).view(B, T, hs)[:, None, :, :]
+                pos_cos_sel = pos_cos_base.index_select(0, position_ids_flat).view(B, T, hs)[:, None, :, :]
+            else:
+                raise ValueError("position_ids must be 1D (T,) or 2D (B, T)")
+
+            q_ = self.apply_rotary_pos_emb(pos_sin_sel, pos_cos_sel, q_)
+            k_ = self.apply_rotary_pos_emb(pos_sin_sel, pos_cos_sel, k_)
         return q_.type_as(q), k_.type_as(k)
 
 
@@ -1266,6 +1277,7 @@ class LLaDAModel(nn.Module):
         # else:
         #     attention_mask = None
             
+        attention_mask_2d: Optional[torch.Tensor] = None
         if attention_mask is not None:
             # Support common HuggingFace-style 2D attention masks as well as 4D SDPA masks.
             # For MDM in this repo, KV cache is disabled so `past_length` is always 0.
@@ -1274,6 +1286,7 @@ class LLaDAModel(nn.Module):
                 if attention_mask.dtype != torch.bool:
                     assert torch.all((attention_mask == 0) | (attention_mask == 1))
                     attention_mask = attention_mask.to(dtype=torch.bool)
+                attention_mask_2d = attention_mask
                 # SDPA supports masks broadcastable to (B, n_heads, T, S). This masks keys only.
                 attention_mask = attention_mask[:, None, None, :]
             elif attention_mask.dim() == 4:
@@ -1286,8 +1299,13 @@ class LLaDAModel(nn.Module):
             else:
                 raise ValueError("attention_mask must be 2D (B, T) or 4D (B, 1, T, S)")
         if position_ids is None:
-            # from past_length to past_length + seq_len
-            position_ids = torch.arange(past_length, past_length + seq_len, dtype=torch.long, device=x.device)
+            if attention_mask_2d is not None:
+                # HF-style position ids that ignore left padding: [0..len-1] for real tokens.
+                position_ids = attention_mask_2d.to(torch.long).cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask_2d == 0, 0)
+            else:
+                # from past_length to past_length + seq_len
+                position_ids = torch.arange(past_length, past_length + seq_len, dtype=torch.long, device=x.device)
         
 
         # Merge attention mask with attention bias.
