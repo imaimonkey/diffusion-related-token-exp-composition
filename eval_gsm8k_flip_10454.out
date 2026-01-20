@@ -1,0 +1,35 @@
+==========================================
+Eval GSM8K (flip_margin)
+Model:               GSAI-ML/LLaDA-8B-Instruct
+Method:              flip_margin
+Dataset:             openai/gsm8k
+Dataset config:      main
+Split:               test
+Limit:               100
+Batch size:          2
+Steps:               256
+Gen length:          256
+Block len:           128
+Temp:                0.0
+CFG scale:           0.0
+Remasking:           low_confidence
+Mask id:             126336
+Log every:           20
+Flip unmask thresh:  0.6
+Flip margin thresh:  0.2
+Flip count thresh:   2
+Fast flag:           0
+Output:              <auto>
+Extra args:          <none>
+Job ID:              10454
+==========================================
+==> Loading model: GSAI-ML/LLaDA-8B-Instruct
+==> Loading dataset: openai/gsm8k
+==> Loaded 100 samples
+[20/100] Accuracy: 65.00% (13/20)
+[40/100] Accuracy: 67.50% (27/40)
+[60/100] Accuracy: 70.00% (42/60)
+[80/100] Accuracy: 72.50% (58/80)
+[100/100] Accuracy: 74.00% (74/100)
+Results saved to: results/gsm8k_flip_margin_20260120_145539.jsonl
+Accuracy: 74.00% (74/100)

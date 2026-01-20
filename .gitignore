@@ -8,8 +8,6 @@ __pycache__/
 *.log
 *.jsonl
 *.yaml
-*.out
-*.err
 
 
 data/livecodebench/
