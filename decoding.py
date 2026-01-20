@@ -23,7 +23,7 @@ def entropy_function(probabilities):
 
 @ torch.no_grad()
 def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336, attention_mask=None):
+             cfg_scale=0., remasking='low_confidence', mask_id=126336, attention_mask=None, return_trace=False):
     '''
     Default decoding function from LLaDA paper
     '''
@@ -50,6 +50,8 @@ def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256,
 
     assert steps % num_blocks == 0
     steps = steps // num_blocks
+
+    trace = [] if return_trace else None
 
     for num_block in range(num_blocks):
         block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
@@ -91,8 +93,25 @@ def decoding_default(model, prompt, steps=256, gen_length=256, block_length=256,
             for j in range(confidence.shape[0]):
                 _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
                 transfer_index[j, select_index] = True
+
+            if return_trace:
+                prompt_len = prompt.shape[1]
+                step_info = []
+                for j in range(x0.shape[0]):
+                    pos_abs = torch.where(transfer_index[j])[0]
+                    pos_gen = pos_abs[pos_abs >= prompt_len] - prompt_len
+                    token_ids = x0[j, pos_abs].tolist()
+                    step_info.append(
+                        {
+                            "positions": pos_gen.tolist(),
+                            "token_ids": token_ids,
+                        }
+                    )
+                trace.append(step_info)
             x[transfer_index] = x0[transfer_index]
 
+    if return_trace:
+        return x, steps * num_blocks, trace
     return x, steps * num_blocks
 
 @ torch.no_grad()
@@ -690,3 +709,280 @@ def get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, nu
         transfer_index[j, select_index] = True
 
     return x0, transfer_index
+
+
+@torch.no_grad()
+def generate_with_flip_margin(
+    model,
+    prompt,
+    steps=256,
+    gen_length=256,
+    block_length=256,
+    temperature=0.0,
+    cfg_scale=0.0,
+    remasking="low_confidence",
+    mask_id=126336,
+    attention_mask=None,
+    unmask_threshold=0.6,
+    margin_threshold=0.2,
+    flip_threshold=2,
+):
+    """
+    Sampling idea:
+      - Unmask all masked positions whose top1 prob >= unmask_threshold AND (top1-top2) >= margin_threshold.
+      - If none match for a sample in a step, unmask 1 position with the highest top1 prob.
+      - Track flip count per position after it gets unmasked at step k:
+          flip += 1 whenever argmax token changes between consecutive steps.
+        If flip >= flip_threshold at position i, remask i AND also remask tokens that were unmasked at steps k-1 and k-2.
+      - Apply remask every step.
+    """
+    x = torch.full(
+        (prompt.shape[0], prompt.shape[1] + gen_length),
+        mask_id,
+        dtype=torch.long,
+        device=model.device,
+    )
+    x[:, : prompt.shape[1]] = prompt.clone()
+
+    prompt_len = prompt.shape[1]
+    prompt_index = torch.zeros_like(x, dtype=torch.bool)
+    prompt_index[:, :prompt_len] = True
+
+    # Track flips of model argmax per position (only meaningful for generated, unmasked positions).
+    flip_counts = torch.zeros_like(x, dtype=torch.int16)
+    last_top1 = torch.full_like(x, fill_value=-1, dtype=torch.long)
+    unmask_step = torch.full_like(x, fill_value=-1, dtype=torch.int32)
+
+    assert gen_length % block_length == 0
+    num_blocks = gen_length // block_length
+    assert steps % num_blocks == 0
+    steps_per_block = steps // num_blocks
+
+    # accepted_positions_history[step] = list (len B) of 1D index tensors (absolute positions) accepted at that step.
+    accepted_positions_history = [[torch.empty(0, dtype=torch.long, device=x.device) for _ in range(x.shape[0])]]
+    global_step = 0
+
+    for num_block in range(num_blocks):
+        allowed_end = prompt_len + (num_block + 1) * block_length
+        for _ in range(steps_per_block):
+            global_step += 1
+            mask_index = x == mask_id
+
+            if cfg_scale > 0.0:
+                un_x = x.clone()
+                un_x[prompt_index] = mask_id
+                x_ = torch.cat([x, un_x], dim=0)
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                else:
+                    attention_mask_ = None
+                logits = model(x_, attention_mask=attention_mask_).logits
+                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+            else:
+                logits = model(x, attention_mask=attention_mask).logits
+
+            # Compute top1/top2 probs without materializing full softmax.
+            top2_logits, top2_ids = torch.topk(logits, k=2, dim=-1)
+            logZ = torch.logsumexp(logits.to(torch.float32), dim=-1)
+            top2_probs = torch.exp(top2_logits.to(torch.float32) - logZ.unsqueeze(-1))
+            top1_probs = top2_probs[..., 0]
+            top2_probs_ = top2_probs[..., 1]
+            margin = top1_probs - top2_probs_
+            top1_ids = top2_ids[..., 0]
+
+            # Flip tracking (for generated positions that are currently unmasked).
+            gen_unmasked = (~prompt_index) & (~mask_index)
+            prev_known = last_top1 != -1
+            flipped = gen_unmasked & prev_known & (top1_ids != last_top1)
+            flip_counts[flipped] += 1
+            last_top1[gen_unmasked] = top1_ids[gen_unmasked]
+
+            # Unmask candidates up to allowed_end (covers previously opened blocks too).
+            allowed = torch.zeros_like(mask_index)
+            allowed[:, prompt_len:allowed_end] = True
+            candidates = mask_index & allowed
+
+            accept = candidates & (top1_probs >= unmask_threshold) & (margin >= margin_threshold)
+
+            # Fallback: if no accepts for a sample, accept exactly 1 highest-confidence masked position.
+            for b in range(x.shape[0]):
+                if not accept[b].any():
+                    conf = torch.where(candidates[b], top1_probs[b], torch.full_like(top1_probs[b], -1.0))
+                    best = torch.argmax(conf)
+                    if conf[best] >= 0:
+                        accept[b, best] = True
+
+            # Apply unmask.
+            x[accept] = top1_ids[accept]
+            unmask_step[accept] = global_step
+            flip_counts[accept] = 0
+            last_top1[accept] = top1_ids[accept]
+
+            accepted_positions_history.append(
+                [torch.where(accept[b])[0] for b in range(x.shape[0])]
+            )
+
+            # Remask rule: if a position i flips >= flip_threshold, remask i and also k-1/k-2 accepted positions,
+            # where k is the step when i was last unmasked.
+            remask = torch.zeros_like(mask_index)
+            triggered = gen_unmasked & (flip_counts >= int(flip_threshold))
+            if triggered.any():
+                for b in range(x.shape[0]):
+                    trig_positions = torch.where(triggered[b])[0]
+                    for pos in trig_positions.tolist():
+                        k = int(unmask_step[b, pos].item())
+                        remask[b, pos] = True
+                        if k - 1 >= 0 and k - 1 < len(accepted_positions_history):
+                            remask[b, accepted_positions_history[k - 1][b]] = True
+                        if k - 2 >= 0 and k - 2 < len(accepted_positions_history):
+                            remask[b, accepted_positions_history[k - 2][b]] = True
+
+            # Never remask prompt tokens.
+            remask[:, :prompt_len] = False
+
+            if remask.any():
+                x[remask] = mask_id
+                flip_counts[remask] = 0
+                last_top1[remask] = -1
+                unmask_step[remask] = -1
+
+    # Finalize: fill any remaining masks in one last forward pass.
+    remaining = (x == mask_id) & (~prompt_index)
+    if remaining.any():
+        logits = model(x, attention_mask=attention_mask).logits
+        top1_ids = torch.argmax(logits, dim=-1)
+        x[remaining] = top1_ids[remaining]
+        global_step += 1
+
+    return x, global_step
+
+
+@torch.no_grad()
+def generate_with_flip_margin_group(
+    model,
+    prompt,
+    steps=256,
+    gen_length=256,
+    block_length=256,
+    temperature=0.0,
+    cfg_scale=0.0,
+    remasking="low_confidence",
+    mask_id=126336,
+    attention_mask=None,
+    unmask_threshold=0.6,
+    margin_threshold=0.2,
+    flip_threshold=2,
+):
+    """
+    Variant of generate_with_flip_margin:
+      - when a seed token (i) triggers remask, remask token i AND all tokens that were accepted in the same step k
+        when i was unmasked (i.e., the accept group at step k).
+    """
+    x = torch.full(
+        (prompt.shape[0], prompt.shape[1] + gen_length),
+        mask_id,
+        dtype=torch.long,
+        device=model.device,
+    )
+    x[:, : prompt.shape[1]] = prompt.clone()
+
+    prompt_len = prompt.shape[1]
+    prompt_index = torch.zeros_like(x, dtype=torch.bool)
+    prompt_index[:, :prompt_len] = True
+
+    flip_counts = torch.zeros_like(x, dtype=torch.int16)
+    last_top1 = torch.full_like(x, fill_value=-1, dtype=torch.long)
+    unmask_step = torch.full_like(x, fill_value=-1, dtype=torch.int32)
+
+    assert gen_length % block_length == 0
+    num_blocks = gen_length // block_length
+    assert steps % num_blocks == 0
+    steps_per_block = steps // num_blocks
+
+    accepted_positions_history = [[torch.empty(0, dtype=torch.long, device=x.device) for _ in range(x.shape[0])]]
+    global_step = 0
+
+    for num_block in range(num_blocks):
+        allowed_end = prompt_len + (num_block + 1) * block_length
+        for _ in range(steps_per_block):
+            global_step += 1
+            mask_index = x == mask_id
+
+            if cfg_scale > 0.0:
+                un_x = x.clone()
+                un_x[prompt_index] = mask_id
+                x_ = torch.cat([x, un_x], dim=0)
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                else:
+                    attention_mask_ = None
+                logits = model(x_, attention_mask=attention_mask_).logits
+                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+            else:
+                logits = model(x, attention_mask=attention_mask).logits
+
+            top2_logits, top2_ids = torch.topk(logits, k=2, dim=-1)
+            logZ = torch.logsumexp(logits.to(torch.float32), dim=-1)
+            top2_probs = torch.exp(top2_logits.to(torch.float32) - logZ.unsqueeze(-1))
+            top1_probs = top2_probs[..., 0]
+            top2_probs_ = top2_probs[..., 1]
+            margin = top1_probs - top2_probs_
+            top1_ids = top2_ids[..., 0]
+
+            gen_unmasked = (~prompt_index) & (~mask_index)
+            prev_known = last_top1 != -1
+            flipped = gen_unmasked & prev_known & (top1_ids != last_top1)
+            flip_counts[flipped] += 1
+            last_top1[gen_unmasked] = top1_ids[gen_unmasked]
+
+            allowed = torch.zeros_like(mask_index)
+            allowed[:, prompt_len:allowed_end] = True
+            candidates = mask_index & allowed
+
+            accept = candidates & (top1_probs >= unmask_threshold) & (margin >= margin_threshold)
+
+            for b in range(x.shape[0]):
+                if not accept[b].any():
+                    conf = torch.where(candidates[b], top1_probs[b], torch.full_like(top1_probs[b], -1.0))
+                    best = torch.argmax(conf)
+                    if conf[best] >= 0:
+                        accept[b, best] = True
+
+            x[accept] = top1_ids[accept]
+            unmask_step[accept] = global_step
+            flip_counts[accept] = 0
+            last_top1[accept] = top1_ids[accept]
+
+            accepted_positions_history.append(
+                [torch.where(accept[b])[0] for b in range(x.shape[0])]
+            )
+
+            remask = torch.zeros_like(mask_index)
+            triggered = gen_unmasked & (flip_counts >= int(flip_threshold))
+            if triggered.any():
+                for b in range(x.shape[0]):
+                    trig_positions = torch.where(triggered[b])[0]
+                    for pos in trig_positions.tolist():
+                        k = int(unmask_step[b, pos].item())
+                        remask[b, pos] = True
+                        if 0 <= k < len(accepted_positions_history):
+                            remask[b, accepted_positions_history[k][b]] = True
+
+            remask[:, :prompt_len] = False
+
+            if remask.any():
+                x[remask] = mask_id
+                flip_counts[remask] = 0
+                last_top1[remask] = -1
+                unmask_step[remask] = -1
+
+    remaining = (x == mask_id) & (~prompt_index)
+    if remaining.any():
+        logits = model(x, attention_mask=attention_mask).logits
+        top1_ids = torch.argmax(logits, dim=-1)
+        x[remaining] = top1_ids[remaining]
+        global_step += 1
+
+    return x, global_step

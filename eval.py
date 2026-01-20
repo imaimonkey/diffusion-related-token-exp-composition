@@ -9,7 +9,7 @@ import jsonlines
 from transformers import  AutoTokenizer
 from modeling_llada import LLaDAModelLM
 from modeling_llada_fast import LLaDAModelLM as LLaDAModelLMFast
-from decoding import decoding_default, decoding_wino, generate_with_saber, generate_with_dual_cache,generate_with_entropy,generate_with_margin,generate_with_remdm
+from decoding import decoding_default, decoding_wino, generate_with_saber, generate_with_dual_cache,generate_with_entropy,generate_with_margin,generate_with_remdm, generate_with_flip_margin, generate_with_flip_margin_group
 import dataset_utils
 import tempfile
 from dataset_utils.eval_correctness_mbpp.evaluation import evaluate_functional_correctness
@@ -45,6 +45,8 @@ def get_generation_function(method_name):
     elif method_name == 'entropy': return generate_with_entropy
     elif method_name == 'margin': return generate_with_margin
     elif method_name == 'remdm': return generate_with_remdm
+    elif method_name == 'flip_margin': return generate_with_flip_margin
+    elif method_name == 'flip_margin_group': return generate_with_flip_margin_group
     else: raise ValueError(f"Unknown method: {method_name}")
 
 def run_single_task_evaluation(config, model, tokenizer):
