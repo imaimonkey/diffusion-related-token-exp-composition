@@ -1028,6 +1028,275 @@ def decoding_graph_aware_v2(
     
     return x, current_step
 
+# ============================================================================
+# Retrospective Cascading (V2-Pivot)
+# ============================================================================
+
+def build_reverse_dependency_graph(
+    forward_graph: Dict[int, Set[int]]
+) -> Dict[int, Set[int]]:
+    """
+    Invert a forward dependency graph.
+    
+    Args:
+        forward_graph: {pos -> set(related_pos)}
+        
+    Returns:
+        rev_graph: {related_pos -> set(pos)}
+    """
+    rev_graph = {}
+    
+    for u, neighbors in forward_graph.items():
+        for v in neighbors:
+            if v not in rev_graph:
+                rev_graph[v] = set()
+            rev_graph[v].add(u)
+            
+    return rev_graph
+
+
+@torch.no_grad()
+def decoding_retrospective_cascading(
+    model,
+    prompt: torch.Tensor,
+    gen_length: int = 256,
+    block_length: int = 128,
+    temperature: float = 0.0,
+    mask_id: int = 126336,
+    # Parameters
+    early_commit_ratio: float = 0.25,
+    confidence_high: float = 0.7,
+    confidence_low: float = 0.4,       # For Primary Retraction
+    attention_threshold: float = 0.15,
+    temporal_decay: float = 0.5,
+    remask_budget: int = 8,            # TOTAL Budget (Primary + Secondary)
+    primary_budget_ratio: float = 0.75, # Max ratio for Primary
+    cooldown_period: int = 3,
+    protect_symbols: bool = True,
+    tokenizer = None
+) -> Tuple[torch.Tensor, int]:
+    """
+    Retrospective Cascading Decoding (Graph-Aware V2 Variant).
+    
+    Trigger: Retraction (Primary Remasking)
+    Action: Check dependents of retracted tokens (Reverse Graph)
+    """
+    device = model.device
+    batch_size = prompt.shape[0]
+    
+    # Initialize masked sequence
+    x = torch.full(
+        (batch_size, prompt.shape[1] + gen_length),
+        mask_id,
+        dtype=torch.long,
+        device=device
+    )
+    x[:, :prompt.shape[1]] = prompt.clone()
+    
+    # State Tracking
+    generation_history = {}  # pos -> step when unmasked
+    committed_step = {}      # pos -> step when first unmasked
+    cooldown_tracker = {}    # pos -> remaining cooldown steps
+    current_step = 0
+    
+    estimated_total_steps = gen_length
+    
+    # Block-wise generation
+    num_blocks = gen_length // block_length
+    
+    for num_block in range(num_blocks):
+        block_start = prompt.shape[1] + num_block * block_length
+        block_end = block_start + block_length
+        
+        block_mask_index = (x[:, block_start:block_end] == mask_id)
+        
+        while block_mask_index.any():
+            current_step += 1
+            
+            # Update cooldown
+            for pos in list(cooldown_tracker.keys()):
+                cooldown_tracker[pos] -= 1
+                if cooldown_tracker[pos] <= 0:
+                    del cooldown_tracker[pos]
+            
+            # Forward pass
+            with torch.no_grad():
+                logits = model(x).logits
+            
+            # Sample
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1)
+            
+            # Confidence
+            p = F.softmax(logits.to(torch.float64), dim=-1)
+            x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+            
+            # Mask index
+            mask_index = (x == mask_id)
+            mask_index[:, block_end:] = False
+            
+            confidence = torch.where(mask_index, x0_p, -np.inf)
+            
+            # ======================================================================
+            # UNMASK (Standard High Confidence)
+            # ======================================================================
+            high_conf_mask = (confidence > confidence_high) & mask_index
+            
+            if high_conf_mask.sum() == 0:
+                max_conf_pos = confidence.argmax(dim=1)
+                for b in range(batch_size):
+                    if mask_index[b].any():
+                        high_conf_mask[b, max_conf_pos[b]] = True
+                        
+            x[high_conf_mask] = x0[high_conf_mask]
+            
+            for b in range(batch_size):
+                positions = torch.where(high_conf_mask[b])[0]
+                for pos in positions:
+                    pos_item = pos.item()
+                    generation_history[pos_item] = current_step
+                    if pos_item not in committed_step:
+                        committed_step[pos_item] = current_step
+            
+            # ======================================================================
+            # RETROSPECTIVE REMASKING
+            # ======================================================================
+            if len(generation_history) > 1:
+                
+                # Setup Anchors (Protected)
+                anchors = set()
+                for pos in range(prompt.shape[1]): anchors.add(pos) # Prompt
+                
+                early_commit_threshold = int(early_commit_ratio * estimated_total_steps)
+                for pos, commit_step in committed_step.items():
+                    if commit_step <= early_commit_threshold:
+                        anchors.add(pos) # Early Commit
+                
+                if protect_symbols and tokenizer is not None:
+                    for pos in generation_history.keys():
+                        if is_numeric_or_operator(x[0, pos].item(), tokenizer):
+                            anchors.add(pos) # Symbols
+                            
+                # ------------------------------------------------------------------
+                # Phase 1: Primary Remask (Self-Correction)
+                # ------------------------------------------------------------------
+                retraction_set = set()
+                
+                # Budget calc
+                primary_budget = max(1, int(remask_budget * primary_budget_ratio))
+                
+                for b in range(batch_size):
+                    # Candidates: Unmasked, Not Anchor, Not Cooldown, Low Confidence
+                    candidates = []
+                    for pos in generation_history.keys():
+                        if pos not in anchors and pos not in cooldown_tracker:
+                            conf = x0_p[b, pos].item()
+                            if conf < confidence_low:
+                                candidates.append((pos, conf))
+                    
+                    # Sort primarily by confidence (lowest first)
+                    candidates.sort(key=lambda item: item[1])
+                    
+                    # Commit Primary
+                    actual_primary_remasks = 0
+                    for pos, conf in candidates:
+                        if actual_primary_remasks >= primary_budget:
+                            break
+                        
+                        x[b, pos] = mask_id
+                        if pos in generation_history: del generation_history[pos]
+                        cooldown_tracker[pos] = cooldown_period
+                        retraction_set.add(pos)
+                        actual_primary_remasks += 1
+                        
+                # ------------------------------------------------------------------
+                # Phase 2: Secondary Remask (Retrospective Cascading)
+                # ------------------------------------------------------------------
+                remaining_budget = remask_budget - len(retraction_set)
+                
+                if len(retraction_set) > 0 and remaining_budget > 0:
+                    
+                    # 1. Build Graph
+                    attention = extract_attention_influence(model, x)
+                    if attention is None:
+                        attention = approximate_attention_uniform(x, generation_history)
+                        
+                    forward_graph = build_dependency_graph(
+                        attention, generation_history, attention_threshold
+                    )
+                    
+                    # 2. Build Reverse Graph (Inversion)
+                    # "Who depends on the retracted pivots?"
+                    # rev_graph[pivot] = {dependents}
+                    rev_graph = build_reverse_dependency_graph(forward_graph)
+                    
+                    # 3. Identify Dependents
+                    potential_dependents = set()
+                    for pivot in retraction_set:
+                        if pivot in rev_graph:
+                            potential_dependents.update(rev_graph[pivot])
+                            
+                    # 4. Filter & Score
+                    secondary_candidates = []
+                    
+                    for b in range(batch_size):
+                        for dep in potential_dependents:
+                            # Status Check
+                            if dep not in generation_history: continue # Already remasked
+                            
+                            # Protection Check
+                            if dep in anchors or dep in cooldown_tracker: continue
+                            
+                            # Confidence Check (Soft Cleanup)
+                            dep_conf = x0_p[b, dep].item()
+                            if dep_conf >= confidence_low: continue # Protected by confidence
+                            
+                            # Relation Score Aggregation (Max over pivots)
+                            max_relation_score = 0.0
+                            
+                            for pivot in retraction_set:
+                                # Check if dep actually depends on this pivot
+                                if pivot in rev_graph and dep in rev_graph[pivot]:
+                                    
+                                    # Attention[dependent, pivot] -> How much dep looked at pivot
+                                    if attention.dim() == 3 and b < attention.shape[0]:
+                                        attn_score = attention[b, dep, pivot].item()
+                                    else:
+                                        attn_score = 1.0 / max(len(generation_history), 1)
+                                        
+                                    temporal_prox = compute_temporal_proximity(
+                                        dep, pivot, generation_history, temporal_decay
+                                    )
+                                    
+                                    score = 0.7 * attn_score + 0.3 * temporal_prox
+                                    if score > max_relation_score:
+                                        max_relation_score = score
+                            
+                            # Threshold Check
+                            if max_relation_score > attention_threshold:
+                                # Priority: Relation * Unconfidence
+                                priority = max_relation_score * (1.0 - dep_conf)
+                                secondary_candidates.append((dep, priority))
+                                
+                    # 5. Selection (Top-K)
+                    secondary_candidates.sort(key=lambda item: item[1], reverse=True)
+                    
+                    count_secondary = 0
+                    for pos, priority in secondary_candidates:
+                        if count_secondary >= remaining_budget:
+                            break
+                            
+                        if x[0, pos] != mask_id: # Double check
+                            x[:, pos] = mask_id
+                            if pos in generation_history: del generation_history[pos]
+                            cooldown_tracker[pos] = cooldown_period
+                            count_secondary += 1
+            
+            # Update block mask
+            block_mask_index = (x[:, block_start:block_end] == mask_id)
+            
+    return x, current_step
+
 # ==========================================
 # Score-Grounded Graph-Aware (SG-GA) Helpers
 # ==========================================

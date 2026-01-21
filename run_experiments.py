@@ -24,7 +24,8 @@ from exp_decoding import (
     decoding_graph_aware_v2,
     decoding_graph_aware_sg_ga,
     decoding_margin_budget,
-    decoding_sgga_wino_hybrid
+    decoding_sgga_wino_hybrid,
+    decoding_retrospective_cascading
 )
 from decoding import decoding_wino
 
@@ -211,6 +212,8 @@ def run_experiment(
             current_config = method_config.copy()
             if method_name == "graph_aware_v2" and "tokenizer" in current_config:
                 current_config["tokenizer"] = tokenizer
+            if method_name == "retrospective_cascading" and "tokenizer" in current_config:
+                current_config["tokenizer"] = tokenizer
             
             # Inject log_dir for SG-GA trace logging and IDs for separation
             # Robust check for SG-GA (handling potential minor name variations)
@@ -317,9 +320,9 @@ def main():
     parser.add_argument("--num_samples", type=int, default=None,
                        help="Alias for --limit")
     parser.add_argument("--methods", type=str, nargs="+", 
-                       default=["graph_aware", "margin_budget"],
-                       choices=["graph_aware", "graph_aware_gradient", "graph_aware_v2", "graph_aware_sg_ga", "margin_budget", "wino", "sgga_wino_hybrid"],
-                       help="Methods to run")
+                        default=["graph_aware", "margin_budget"],
+                        choices=["graph_aware", "graph_aware_gradient", "graph_aware_v2", "graph_aware_sg_ga", "margin_budget", "wino", "sgga_wino_hybrid", "retrospective_cascading"],
+                        help="Methods to run")
     parser.add_argument("--results_dir", type=str, default="results",
                        help="Results directory")
     parser.add_argument("--run_id", type=str, default=None,
@@ -494,8 +497,27 @@ def main():
             "alpha": 0.5,
             "min_budget": 3,
             "max_budget": 15,
+            "min_budget": 3,
+            "max_budget": 15,
             "tau_low": 0.05,
             "tau_high": 0.15,
+        },
+        "retrospective_cascading": {
+            "gen_length": 256,
+            "block_length": 128,
+            "temperature": 0.0,
+            "mask_id": 126336,
+            # RC parameters
+            "early_commit_ratio": 0.25,
+            "confidence_high": 0.7,
+            "confidence_low": 0.4,
+            "attention_threshold": 0.15,
+            "temporal_decay": 0.5,
+            "remask_budget": 8,
+            "primary_budget_ratio": 0.75,
+            "cooldown_period": 3,
+            "protect_symbols": True,
+            "tokenizer": None,
         }
     }
     
@@ -525,7 +547,9 @@ def main():
         "graph_aware_sg_ga": decoding_graph_aware_sg_ga,
         "margin_budget": decoding_margin_budget,
         "wino": decoding_wino,
+        "wino": decoding_wino,
         "sgga_wino_hybrid": decoding_sgga_wino_hybrid,
+        "retrospective_cascading": decoding_retrospective_cascading,
     }
     
     # Run experiments
