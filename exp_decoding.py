@@ -1162,7 +1162,11 @@ def decoding_retrospective_cascading(
             # RETROSPECTIVE REMASKING
             # ======================================================================
             if len(generation_history) > 1:
-                
+                # [CRITICAL UPDATE] Enforce batch_size=1 to avoid logic inconsistency in RC
+                # RC is complex stateful logic, batching it requires careful per-sample state tracking
+                if batch_size != 1:
+                    raise ValueError("Retrospective Cascading currently supports batch_size=1 only.")
+
                 # Setup Anchors (Protected)
                 anchors = set()
                 for pos in range(prompt.shape[1]): anchors.add(pos) # Prompt
@@ -1176,7 +1180,18 @@ def decoding_retrospective_cascading(
                     for pos in generation_history.keys():
                         if is_numeric_or_operator(x[0, pos].item(), tokenizer):
                             anchors.add(pos) # Symbols
-                            
+                
+                # [CRITICAL UPDATE] Build Graph BEFORE Primary Remask
+                # We need to know dependencies of tokens *before* we potentially remove them
+                attention = extract_attention_influence(model, x)
+                if attention is None:
+                    attention = approximate_attention_uniform(x, generation_history)
+                    
+                forward_graph = build_dependency_graph(
+                    attention, generation_history, attention_threshold
+                )
+                rev_graph = build_reverse_dependency_graph(forward_graph)
+
                 # ------------------------------------------------------------------
                 # Phase 1: Primary Remask (Self-Correction)
                 # ------------------------------------------------------------------
@@ -1190,7 +1205,10 @@ def decoding_retrospective_cascading(
                     candidates = []
                     for pos in generation_history.keys():
                         if pos not in anchors and pos not in cooldown_tracker:
-                            conf = x0_p[b, pos].item()
+                            # [CRITICAL UPDATE] Use probability of CURRENT token in x, not max prob
+                            current_token_id = x[b, pos].item()
+                            conf = p[b, pos, current_token_id].item() 
+                            
                             if conf < confidence_low:
                                 candidates.append((pos, conf))
                     
@@ -1216,20 +1234,6 @@ def decoding_retrospective_cascading(
                 
                 if len(retraction_set) > 0 and remaining_budget > 0:
                     
-                    # 1. Build Graph
-                    attention = extract_attention_influence(model, x)
-                    if attention is None:
-                        attention = approximate_attention_uniform(x, generation_history)
-                        
-                    forward_graph = build_dependency_graph(
-                        attention, generation_history, attention_threshold
-                    )
-                    
-                    # 2. Build Reverse Graph (Inversion)
-                    # "Who depends on the retracted pivots?"
-                    # rev_graph[pivot] = {dependents}
-                    rev_graph = build_reverse_dependency_graph(forward_graph)
-                    
                     # 3. Identify Dependents
                     potential_dependents = set()
                     for pivot in retraction_set:
@@ -1248,7 +1252,10 @@ def decoding_retrospective_cascading(
                             if dep in anchors or dep in cooldown_tracker: continue
                             
                             # Confidence Check (Soft Cleanup)
-                            dep_conf = x0_p[b, dep].item()
+                            # [CRITICAL UPDATE] Use probability of CURRENT token in x
+                            current_token_id = x[b, dep].item()
+                            dep_conf = p[b, dep, current_token_id].item()
+                            
                             if dep_conf >= confidence_low: continue # Protected by confidence
                             
                             # Relation Score Aggregation (Max over pivots)
@@ -1279,6 +1286,9 @@ def decoding_retrospective_cascading(
                                 secondary_candidates.append((dep, priority))
                                 
                     # 5. Selection (Top-K)
+                    # Handle potential duplicate dependents by taking max priority (though logic above is per-dep)
+                    # Since we iterate potential_dependents set, duplicates are already handled per batch loop unique check?
+                    # Ah, multiple batches not supported, so b=0 only.
                     secondary_candidates.sort(key=lambda item: item[1], reverse=True)
                     
                     count_secondary = 0
@@ -1286,6 +1296,7 @@ def decoding_retrospective_cascading(
                         if count_secondary >= remaining_budget:
                             break
                             
+                        # [CRITICAL UPDATE] Ensure consistent remask application for batch (batch_size=1 enforced)
                         if x[0, pos] != mask_id: # Double check
                             x[:, pos] = mask_id
                             if pos in generation_history: del generation_history[pos]
