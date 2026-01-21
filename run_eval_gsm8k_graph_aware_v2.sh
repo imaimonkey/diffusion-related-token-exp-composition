@@ -6,9 +6,10 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00
+#SBATCH --nodelist=server2
 
 # 작업 디렉토리로 이동 (필요 시 수정)
-# cd /home/kimhj/difffusion-sampling-exp-benchmark-playground
+cd /home/kimhj/diffusion-related-token-exp-composition
 
 # 로그 디렉토리 생성
 mkdir -p logs
