@@ -173,18 +173,31 @@ def run_experiment(
     dataset_display = dataset_short.upper()
     
     print(f"\n{'='*60}")
-    print(f"[{dataset_display}] {method_name.upper()} 평가 시작")
-    print(f"{'='*60}")
-    print(f"데이터셋: {dataset_name}")
-    print(f"샘플 수: {total}")
-    print(f"결과 저장 경로: {output_path}")
+    print(f"Eval {dataset_display} ({method_name})")
+    print(f"Model:               {model.name_or_path if hasattr(model, 'name_or_path') else 'Unknown'}")
+    print(f"Method:              {method_name}")
+    print(f"Dataset:             {dataset_name}")
+    print(f"Limit:               {total}")
+    print(f"Config:              {method_config}")
+    print(f"Output:              {output_path}")
     print(f"{'='*60}\n")
     
+    import time
+    
     with open(output_path, "w", encoding="utf-8") as f:
-        for idx, doc in enumerate(tqdm(dataset, desc=f"{dataset_display}/{method_name}")):
+        # Use simple iterator instead of tqdm for cleaner log if requested, 
+        # but user likely wants progress bar in interactive + clean logs in file.
+        # simpler to just print cleanly.
+        start_time = time.time()
+        
+        # We will keep tqdm for interactive usage but ensure clean prints for logs
+        iterator = tqdm(dataset, desc=f"{dataset_display}/{method_name}")
+        
+        for idx, doc in enumerate(iterator):
             question = doc.get("question", "")
             answer_raw = doc.get("answer", "")
             
+            # ... (build prompt, tokenize, decode, evaluate logic remains same) ...
             # Build prompt
             prompt_text, prompt = build_prompt(question, tokenizer)
             
@@ -202,8 +215,6 @@ def run_experiment(
             # Inject log_dir for SG-GA trace logging and IDs for separation
             # Robust check for SG-GA (handling potential minor name variations)
             if "graph_aware_sg_ga" in method_name:
-                print(f"[INJECTION] SG-GA detected. Sample idx={idx}, shard={shard_index}")
-                
                 # Construct explicit trace log path to prevent directory ambiguity
                 trace_filename = "trace_sag_ga.jsonl"
                 if shard_index is not None:
@@ -215,13 +226,7 @@ def run_experiment(
                 current_config["trace_log_path"] = str(trace_full_path)
                 current_config["sample_id"] = idx
                 current_config["shard_id"] = shard_index
-                
-                print(f"[INJECTION] Config updated: trace_path={trace_full_path}, sample_id={idx}")
             
-            # DEBUG: Check injection
-            if "graph_aware_sg_ga" in method_name:
-                print(f"[DEBUG] Calling SG-GA. TracePath: {current_config.get('trace_log_path')}, SampleID: {current_config.get('sample_id')}")
-
             gen_output, steps = method_func(
                 model,
                 input_ids,
@@ -241,6 +246,17 @@ def run_experiment(
             if is_correct:
                 correct += 1
             
+            # Periodic logging matching user format
+            # [20/100] Accuracy: 65.00% (13/20)
+            if (idx + 1) % 20 == 0:
+                current_acc = (correct / (idx + 1)) * 100
+                shard_info = f"[Shard {shard_index}] " if shard_index is not None else ""
+                log_msg = f"{shard_info}[{idx+1}/{total}] Accuracy: {current_acc:.2f}% ({correct}/{idx+1})"
+                
+                # Print to stdout (captured by .out file)
+                # Tqdm.write avoids breaking progress bar
+                iterator.write(log_msg)
+
             # Save result
             record = {
                 "index": idx,
@@ -261,12 +277,9 @@ def run_experiment(
     avg_nfe = np.mean([r['steps'] for r in results])
     
     print(f"\n{'='*60}")
-    print(f"[{dataset_display}] {method_name.upper()} 평가 완료!")
-    print(f"{'='*60}")
-    print(f"데이터셋: {dataset_name}")
-    print(f"결과 파일: {output_path}")
-    print(f"정확도: {accuracy:.2f}% ({correct}/{total})")
-    print(f"평균 NFE: {avg_nfe:.2f}")
+    print(f"Results saved to: {output_path}")
+    print(f"Accuracy: {accuracy:.2f}% ({correct}/{total})")
+    print(f"Average NFE: {avg_nfe:.2f}")
     print(f"{'='*60}\n")
     
     # Save summary (only in non-shard mode; merge_results handles shard mode)
