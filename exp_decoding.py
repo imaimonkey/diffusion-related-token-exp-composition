@@ -1416,14 +1416,60 @@ def _decoding_sg_ga_impl(
 ):
     device = model.device
     batch_size = prompt.shape[0]
-    
+    prompt_len = prompt.shape[1]
+
+    trace_enabled = bool(trace_log_path)
+    if trace_enabled:
+        import json
+        import os
+        import time
+
+        trace_path = str(trace_log_path)
+        os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+
+        def trace_write(obj):
+            try:
+                with open(trace_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+
+        prompt_head_len = min(32, prompt_len)
+        prompt_head = prompt[0, :prompt_head_len].detach().cpu().tolist() if batch_size > 0 else []
+        trace_write({
+            "type": "meta",
+            "ts": time.time(),
+            "method": "graph_aware_sg_ga",
+            "sample_id": sample_id if sample_id is not None else -1,
+            "shard_id": shard_id if shard_id is not None else "main",
+            "prompt_len": int(prompt_len),
+            "prompt_head_token_ids": prompt_head,
+            "gen_length": int(gen_length),
+            "block_length": int(block_length),
+            "temperature": float(temperature),
+            "mask_id": int(mask_id),
+            "params": {
+                "alpha": float(alpha),
+                "tau_low": float(tau_low),
+                "tau_high": float(tau_high),
+                "min_budget": int(min_budget),
+                "max_budget": int(max_budget),
+                "graph_threshold": float(graph_threshold),
+                "confidence_threshold": float(confidence_threshold),
+            },
+        })
+
     x = torch.full((batch_size, prompt.shape[1] + gen_length), mask_id, dtype=torch.long, device=device)
     x[:, :prompt.shape[1]] = prompt.clone()
-    
+
     generation_history = {}
     current_step = 0
     prev_score_vectors = None
-    
+    forced_fill_count = 0
+    total_remask_count = 0
+    remask_counts_by_pos = {}  # (b, pos) -> count
+    last_force_convergence_step = None
+
     # Block-wise generation
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
@@ -1440,6 +1486,7 @@ def _decoding_sg_ga_impl(
         max_loop_steps = 100 # Increased to 100 to match WINO's NFE distribution (Avg ~48)
         
         while block_mask_index.any():
+            masked_before = int(block_mask_index.sum().item())
             current_step += 1
             loop_step += 1
             
@@ -1451,8 +1498,19 @@ def _decoding_sg_ga_impl(
             if loop_step > max_loop_steps:
                 print(f"\n[SG-GA WARNING] Max Loop Steps ({max_loop_steps}) Reached!", flush=True)
                 print(f" - Block: {num_block}, Global Step: {current_step}, Loop Step: {loop_step}", flush=True)
-                print(f" - Remaining Masks: {block_mask_index.sum().item()}", flush=True)
+                print(f" - Remaining Masks: {masked_before}", flush=True)
                 print(f" - Action: Forcing mask fill for remaining tokens and breaking block.", flush=True)
+
+                if trace_enabled:
+                    trace_write({
+                        "type": "event",
+                        "event": "forced_fill",
+                        "step": int(current_step),
+                        "loop_step": int(loop_step),
+                        "block_idx": int(num_block),
+                        "masked_before": int(masked_before),
+                        "max_loop_steps": int(max_loop_steps),
+                    })
                 
                 # Force fill masks with current prediction and break
                 with torch.no_grad():
@@ -1460,11 +1518,14 @@ def _decoding_sg_ga_impl(
                     x0 = torch.argmax(logits, dim=-1)
                     mask_indices = torch.nonzero(x == mask_id, as_tuple=True)
                     x[mask_indices] = x0[mask_indices]
+                forced_fill_count += 1
                 break
             
             # FORCE PROGRESS Strategy:
             # If loop_step is high (e.g. > 50), disable remasking to ensure convergence
             force_convergence = (loop_step > 50)
+            if force_convergence and last_force_convergence_step is None:
+                last_force_convergence_step = current_step
             
             # OPTIMIZATION 4: Unmask Threshold Annealing
             # Decay from confidence_threshold (0.75) to 0.5 as we approach max_loop_steps
@@ -1540,31 +1601,16 @@ def _decoding_sg_ga_impl(
                 
             theoretical_budget = compute_entropy_budget(logits_curr, alpha, min_budget, max_budget, 
                                           curvature=curvature, step_decay=step_decay)
-            
-            # === LOGGING START ===
-            log_entry = {
-                "step": current_step,
-                "loop_step": loop_step,
-                # Identity fields
-                "sample_id": sample_id if sample_id is not None else -1, 
-                "shard_id": shard_id if shard_id is not None else "main",
-                "masked_count": block_mask_index.sum().item(),
-                "metrics": {
-                    "curvature": float(curvature),
-                    "theoretical_budget": float(theoretical_budget),
-                    "step_decay": float(step_decay),
-                    "cascade_depth": cascade_depth
-                },
-                "unmasked": [],
-                "remasked": []
-            }
-            
-            for b in range(batch_size):
-                 unmasked_ids = newly_unmasked[b]
-                 log_entry["unmasked"].append({"batch": b, "ids": unmasked_ids, "count": len(unmasked_ids)})
-            # === LOGGING END ===
 
             budget = theoretical_budget
+
+            step_remask_requested = 0
+            step_remask_applied = 0
+            step_remask_skipped_cooldown = 0
+            step_remask_skipped_budget = 0
+            graph_stats = {}
+            effective_budgets = {}
+            step_remasked = []
 
             if cascade_depth > 0 and not force_convergence:
                 batch_entropy = compute_entropy(logits_curr) # [B, L]
@@ -1575,7 +1621,7 @@ def _decoding_sg_ga_impl(
                 # if loop_step % 10 == 0:
                 #     print(f"  > [Metrics] Curv: {curvature:.4f}, Budget: {budget}, Decay: {step_decay:.2f}", flush=True)
                 
-                remask_requests = [] # List of (b, pos, priority)
+                remask_requests = [] # List of (b, pos, priority, sim, entropy)
                 
                 for b in range(batch_size):
                     # STRICT CONVERGENCE CHECK:
@@ -1630,17 +1676,37 @@ def _decoding_sg_ga_impl(
                     mask = (max_sim_per_target > graph_threshold)
                     
                     valid_cands_indices = torch.where(mask)[0]
+                    if len(existing_gen_tokens) > 0 and len(unmasked_this) > 0:
+                        try:
+                            graph_stats[b] = {
+                                "sources": int(len(unmasked_this)),
+                                "targets": int(len(existing_gen_tokens)),
+                                "candidates": int(valid_cands_indices.numel()),
+                                "max_sim_mean": float(max_sim_per_target.mean().item()),
+                                "max_sim_max": float(max_sim_per_target.max().item()),
+                                "entropy_mean_targets": float(current_entropies.mean().item()),
+                                "entropy_max_targets": float(current_entropies.max().item()),
+                            }
+                        except Exception:
+                            graph_stats[b] = {
+                                "sources": int(len(unmasked_this)),
+                                "targets": int(len(existing_gen_tokens)),
+                                "candidates": int(valid_cands_indices.numel()),
+                            }
                     for idx in valid_cands_indices:
                         pos = existing_gen_tokens[idx.item()]
                         prio = priorities[idx].item()
-                        remask_requests.append((b, pos, prio))
+                        sim = max_sim_per_target[idx].item()
+                        ent = current_entropies[idx].item()
+                        remask_requests.append((b, pos, prio, sim, ent))
+                        step_remask_requested += 1
                         
                 # Sort globally or per batch? Per batch usually.
                 # Let's process per batch
                 requests_by_batch = {}
-                for b, pos, prio in remask_requests:
+                for b, pos, prio, sim, ent in remask_requests:
                     if b not in requests_by_batch: requests_by_batch[b] = []
-                    requests_by_batch[b].append((pos, prio))
+                    requests_by_batch[b].append((pos, prio, sim, ent))
                 
                 for b in requests_by_batch:
                     cands = sorted(requests_by_batch[b], key=lambda i: i[1], reverse=True)
@@ -1651,20 +1717,27 @@ def _decoding_sg_ga_impl(
                         effective_budget = 0
                     else:
                         effective_budget = min(budget, num_unmasked_this_step - 1)
-                    
-                    if "effective_budgets" not in log_entry["metrics"]: log_entry["metrics"]["effective_budgets"] = {}
-                    log_entry["metrics"]["effective_budgets"][b] = float(effective_budget)
+                    effective_budgets[int(b)] = int(effective_budget)
 
                     applied_count = 0
-                    for pos, prio in cands:
+                    for pos, prio, sim, ent in cands:
                         if applied_count >= effective_budget: break
                         
                         # Cooldown Check (e.g., 3 steps)
                         last_remask = remask_cooldown.get((b, pos), -999)
                         if current_step - last_remask < 3:
+                            step_remask_skipped_cooldown += 1
                             continue
                             
                         if x[b, pos] != mask_id:
+                            token_id_before = int(x[b, pos].item())
+                            token_str = None
+                            if tokenizer is not None:
+                                try:
+                                    token_str = tokenizer.decode([token_id_before])
+                                except Exception:
+                                    token_str = None
+
                             x[b, pos] = mask_id
                             if (b, pos) in generation_history:
                                 del generation_history[(b, pos)]
@@ -1672,34 +1745,98 @@ def _decoding_sg_ga_impl(
                             # Update Cooldown
                             remask_cooldown[(b, pos)] = current_step
                             applied_count += 1
-                            log_entry["remasked"].append({"batch": b, "pos": pos, "priority": float(prio)})
-            
-            # Dump log entry
-            try:
-                import json
-                import os
-                
-                # Determine log path
-                if trace_log_path:
-                    # Use provided absolute path
-                    final_path = trace_log_path
-                    # Ensure directory exists (though run_experiments should handle this, safety first)
-                    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-                else:
-                    # Fallback to local file
-                    if shard_id is not None:
-                        final_path = f"trace_sag_ga_shard{shard_id}.jsonl"
-                    else:
-                        final_path = "trace_sag_ga.jsonl"
-                    
-                with open(final_path, "a") as f:
-                    f.write(json.dumps(log_entry) + "\n")
-            except Exception as e:
-                # print(f"Logging failed: {e}")
-                pass
-                            
+                            step_remask_applied += 1
+                            total_remask_count += 1
+                            remask_counts_by_pos[(b, pos)] = remask_counts_by_pos.get((b, pos), 0) + 1
+
+                            remasked_entry = {
+                                "batch": int(b),
+                                "pos": int(pos),
+                                "priority": float(prio),
+                                "sim": float(sim),
+                                "entropy": float(ent),
+                                "token_id_before": int(token_id_before),
+                                "effective_budget": int(effective_budget),
+                            }
+                            if token_str is not None:
+                                remasked_entry["token_str_before"] = token_str
+                            step_remasked.append(remasked_entry)
+
+                    step_remask_skipped_budget += max(0, len(cands) - int(effective_budget))
+
+            # Update block mask index
             block_mask_index = (x[:, block_start:block_end] == mask_id)
-            
+            masked_after = int(block_mask_index.sum().item())
+
+            if trace_enabled:
+                step_record = {
+                    "type": "step",
+                    "ts": time.time(),
+                    "method": "graph_aware_sg_ga",
+                    "sample_id": sample_id if sample_id is not None else -1,
+                    "shard_id": shard_id if shard_id is not None else "main",
+                    "step": int(current_step),
+                    "block_idx": int(num_block),
+                    "loop_step": int(loop_step),
+                    "masked_before": int(masked_before),
+                    "masked_after": int(masked_after),
+                    "thresholds": {
+                        "confidence_unmask": float(current_conf_thresh),
+                        "graph_threshold": float(graph_threshold),
+                    },
+                    "metrics": {
+                        "curvature": float(curvature),
+                        "cascade_depth": int(cascade_depth),
+                        "budget": float(theoretical_budget),
+                        "step_decay": float(step_decay),
+                        "force_convergence": bool(force_convergence),
+                        "generation_history_size": int(len(generation_history)),
+                        "remask_cooldown_size": int(len(remask_cooldown)),
+                        "remask_requested": int(step_remask_requested),
+                        "remask_applied": int(step_remask_applied),
+                        "remask_skipped_cooldown": int(step_remask_skipped_cooldown),
+                        "remask_skipped_budget": int(step_remask_skipped_budget),
+                        "effective_budgets": effective_budgets,
+                    },
+                    "unmasked": [],
+                    "graph_stats": graph_stats,
+                    "remasked": step_remasked,
+                }
+
+                for b in range(batch_size):
+                    positions = newly_unmasked[b]
+                    tokens = []
+                    for pos in positions:
+                        token_id = int(x[b, pos].item())
+                        conf = float(x0_p[b, pos].item())
+                        tok = {"pos": int(pos), "token_id": int(token_id), "confidence": float(conf)}
+                        if tokenizer is not None:
+                            try:
+                                tok["token_str"] = tokenizer.decode([token_id])
+                            except Exception:
+                                pass
+                        tokens.append(tok)
+                    step_record["unmasked"].append({"batch": int(b), "count": int(len(positions)), "tokens": tokens})
+
+                trace_write(step_record)
+
+    if trace_enabled:
+        top_remasked = sorted(remask_counts_by_pos.items(), key=lambda kv: kv[1], reverse=True)[:50]
+        trace_write({
+            "type": "summary",
+            "ts": time.time(),
+            "method": "graph_aware_sg_ga",
+            "sample_id": sample_id if sample_id is not None else -1,
+            "shard_id": shard_id if shard_id is not None else "main",
+            "total_steps": int(current_step),
+            "forced_fill_count": int(forced_fill_count),
+            "total_remask_count": int(total_remask_count),
+            "first_force_convergence_step": int(last_force_convergence_step) if last_force_convergence_step is not None else None,
+            "top_remasked_positions": [
+                {"batch": int(b), "pos": int(pos), "count": int(cnt)} for ((b, pos), cnt) in top_remasked
+            ],
+        })
+
     return x, current_step
 
 

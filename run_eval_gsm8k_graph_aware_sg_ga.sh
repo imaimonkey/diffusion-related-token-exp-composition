@@ -19,8 +19,8 @@ mkdir -p logs
 # 실험 설정 (Graph-Aware SG-GA/SAGA)
 # ============================================================================
 
-# 실행 모드: "dynamic"
-MODE="dynamic"
+# SGGA trace on/off (1=enable, 0=disable)
+export SGGA_TRACE="${SGGA_TRACE:-1}"
 
 DATASETS=("openai/gsm8k")
 METHODS=("graph_aware_sg_ga")

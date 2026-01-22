@@ -214,10 +214,14 @@ def run_experiment(
                 current_config["tokenizer"] = tokenizer
             if method_name == "retrospective_cascading" and "tokenizer" in current_config:
                 current_config["tokenizer"] = tokenizer
+            if method_name == "graph_aware_sg_ga" and "tokenizer" in current_config:
+                current_config["tokenizer"] = tokenizer
             
             # Inject log_dir for SG-GA trace logging and IDs for separation
             # Robust check for SG-GA (handling potential minor name variations)
-            if "graph_aware_sg_ga" in method_name:
+            sgga_trace_flag = os.environ.get("SGGA_TRACE", "1").strip().lower()
+            sgga_trace_enabled = sgga_trace_flag not in ("0", "false", "no", "off")
+            if "graph_aware_sg_ga" in method_name and sgga_trace_enabled:
                 # Construct explicit trace log path to prevent directory ambiguity
                 trace_filename = "trace_sag_ga.jsonl"
                 if shard_index is not None:
@@ -476,6 +480,7 @@ def main():
             "max_budget": 15,
             "graph_threshold": 0.2, # Optimized 0.1->0.2
             "confidence_threshold": 0.5, # MATCH WINO BASELINE
+            "tokenizer": None,  # Optional: enables token string logging in traces
         },
         "wino": {
             "gen_length": 256,
