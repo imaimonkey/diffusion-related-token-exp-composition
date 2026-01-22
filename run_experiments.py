@@ -136,6 +136,7 @@ def run_experiment(
     results_dir: Path,
     dataset_name: str = "gsm1k",
     shard_index: Optional[int] = None,
+    shard_start_idx: int = 0,
     device: str = "cuda"
 ):
     """
@@ -152,6 +153,7 @@ def run_experiment(
         results_dir: Directory to save results
         dataset_name: Name of dataset for file naming
         shard_index: Shard index if running in parallel (None for non-sharded)
+        shard_start_idx: Global start index for this shard
         device: Device to use
     
     Returns:
@@ -195,6 +197,7 @@ def run_experiment(
         iterator = tqdm(dataset, desc=f"{dataset_display}/{method_name}")
         
         for idx, doc in enumerate(iterator):
+            dataset_index = int(shard_start_idx) + int(idx)
             question = doc.get("question", "")
             answer_raw = doc.get("answer", "")
             
@@ -233,6 +236,7 @@ def run_experiment(
                 current_config["trace_log_path"] = str(trace_full_path)
                 current_config["sample_id"] = idx
                 current_config["shard_id"] = shard_index
+                current_config["global_index"] = dataset_index
             
             gen_output, steps = method_func(
                 model,
@@ -267,6 +271,8 @@ def run_experiment(
             # Save result
             record = {
                 "index": idx,
+                "dataset_index": dataset_index,
+                "shard_id": shard_index,
                 "question": question,
                 "answer_raw": answer_raw,
                 "answer": answer,
@@ -571,6 +577,7 @@ def main():
             results_dir=results_dir,
             dataset_name=args.dataset,
             shard_index=args.shard_index,
+            shard_start_idx=start_idx if args.shard_index is not None and args.num_shards is not None else 0,
             device=device
         )
         all_results[method_name] = results

@@ -1,0 +1,11 @@
+{
+  "method": "graph_aware_v2",
+  "dataset": "openai/gsm8k",
+  "total_samples": 1319,
+  "accuracy": 73.84382107657316,
+  "correct_count": 974,
+  "avg_nfe": 44.38286580742987,
+  "median_nfe": 41.0,
+  "work_stealing": true,
+  "num_chunks": 3
+}

@@ -1393,6 +1393,7 @@ def decoding_graph_aware_sg_ga(
     trace_log_path: str = None,
     sample_id: int = None,
     shard_id: int = None,
+    global_index: int = None,
     tokenizer=None,
     **kwargs
 ) -> Tuple[torch.Tensor, int]:
@@ -1406,13 +1407,17 @@ def decoding_graph_aware_sg_ga(
     return _decoding_sg_ga_impl(
         model, prompt, gen_length, block_length, temperature, mask_id,
         alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold,
-        trace_log_path=trace_log_path, sample_id=sample_id, shard_id=shard_id, tokenizer=tokenizer
+        trace_log_path=trace_log_path,
+        sample_id=sample_id,
+        shard_id=shard_id,
+        global_index=global_index,
+        tokenizer=tokenizer,
     )
 
 def _decoding_sg_ga_impl(
     model, prompt, gen_length, block_length, temperature, mask_id,
     alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold=0.75,
-    trace_log_path=None, sample_id=None, shard_id=None, tokenizer=None
+    trace_log_path=None, sample_id=None, shard_id=None, global_index=None, tokenizer=None
 ):
     device = model.device
     batch_size = prompt.shape[0]
@@ -1442,6 +1447,7 @@ def _decoding_sg_ga_impl(
             "method": "graph_aware_sg_ga",
             "sample_id": sample_id if sample_id is not None else -1,
             "shard_id": shard_id if shard_id is not None else "main",
+            "global_index": global_index,
             "prompt_len": int(prompt_len),
             "prompt_head_token_ids": prompt_head,
             "gen_length": int(gen_length),
@@ -1775,6 +1781,7 @@ def _decoding_sg_ga_impl(
                     "method": "graph_aware_sg_ga",
                     "sample_id": sample_id if sample_id is not None else -1,
                     "shard_id": shard_id if shard_id is not None else "main",
+                    "global_index": global_index,
                     "step": int(current_step),
                     "block_idx": int(num_block),
                     "loop_step": int(loop_step),
@@ -1828,6 +1835,7 @@ def _decoding_sg_ga_impl(
             "method": "graph_aware_sg_ga",
             "sample_id": sample_id if sample_id is not None else -1,
             "shard_id": shard_id if shard_id is not None else "main",
+            "global_index": global_index,
             "total_steps": int(current_step),
             "forced_fill_count": int(forced_fill_count),
             "total_remask_count": int(total_remask_count),

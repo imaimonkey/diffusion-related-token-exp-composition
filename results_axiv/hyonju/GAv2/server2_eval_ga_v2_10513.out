@@ -1,0 +1,276 @@
+==========================================
+실험 시작: Graph-Aware V2
+==========================================
+Job ID: 10513
+Run ID: 20260121_100225
+Mode: dynamic
+Override: {"block_length": 128}
+==========================================
+GPU Pool: 0,1,2
+
+
+============================================================
+완전 자동화 Work Stealing 스케줄러
+============================================================
+GPU Pool: [0, 1, 2] (3 GPUs)
+Datasets: ['openai/gsm8k']
+Methods: ['graph_aware_v2']
+Samples: ALL
+Overrides: {"block_length": 128}
+============================================================
+
+graph_aware_v2@gsm8k: 3 chunks (auto-calculated)
+
+Total chunks: 3
+
+[GPU 0] Starting: graph_aware_v2@gsm8k chunk0/3
+[GPU 1] Starting: graph_aware_v2@gsm8k chunk1/3
+[GPU 2] Starting: graph_aware_v2@gsm8k chunk2/3
+
+============================================================
+실험 설정
+============================================================
+Run ID: 20260121_100225
+모델: GSAI-ML/LLaDA-8B-Instruct
+데이터셋: openai/gsm8k
+샘플 수: 전체
+실행 방법: graph_aware_v2
+============================================================
+
+결과 저장 디렉터리: results/20260121_100225
+
+모델 로딩 중...
+
+============================================================
+실험 설정
+============================================================
+Run ID: 20260121_100225
+모델: GSAI-ML/LLaDA-8B-Instruct
+데이터셋: openai/gsm8k
+샘플 수: 전체
+실행 방법: graph_aware_v2
+============================================================
+
+결과 저장 디렉터리: results/20260121_100225
+
+모델 로딩 중...
+
+============================================================
+실험 설정
+============================================================
+Run ID: 20260121_100225
+모델: GSAI-ML/LLaDA-8B-Instruct
+데이터셋: openai/gsm8k
+샘플 수: 전체
+실행 방법: graph_aware_v2
+============================================================
+
+결과 저장 디렉터리: results/20260121_100225
+
+모델 로딩 중...
+✓ 모델 로딩 완료 (device: cuda)
+
+토크나이저 로딩 중...
+✓ 모델 로딩 완료 (device: cuda)
+
+토크나이저 로딩 중...
+✓ 모델 로딩 완료 (device: cuda)
+
+토크나이저 로딩 중...
+✓ 토크나이저 로딩 완료
+
+데이터셋 로딩 중: openai/gsm8k
+✓ 토크나이저 로딩 완료
+
+데이터셋 로딩 중: openai/gsm8k
+✓ 토크나이저 로딩 완료
+
+데이터셋 로딩 중: openai/gsm8k
+✓ 샤드 3/3: 439개 샘플 (전체 1319개 중 880~1319)
+
+
+============================================================
+Configuration Overrides Applied:
+============================================================
+  block_length: 128
+============================================================
+
+
+============================================================
+Eval GSM8K (graph_aware_v2)
+Model:               GSAI-ML/LLaDA-8B-Instruct
+Method:              graph_aware_v2
+Dataset:             openai/gsm8k
+Limit:               439
+Config:              {'gen_length': 256, 'block_length': 128, 'temperature': 0.0, 'mask_id': 126336, 'early_commit_ratio': 0.25, 'cascade_start_ratio': 0.3, 'cascade_full_ratio': 0.5, 'confidence_high': 0.7, 'confidence_low': 0.4, 'attention_threshold': 0.15, 'temporal_decay_strong': 1.0, 'temporal_decay_base': 0.5, 'remask_budget': 8, 'cooldown_period': 3, 'protect_symbols': True, 'tokenizer': None}
+Output:              results/20260121_100225/gsm8k_graph_aware_v2_shard2.jsonl
+============================================================
+
+✓ 샤드 2/3: 440개 샘플 (전체 1319개 중 440~880)
+
+
+============================================================
+Configuration Overrides Applied:
+============================================================
+  block_length: 128
+============================================================
+
+
+============================================================
+Eval GSM8K (graph_aware_v2)
+Model:               GSAI-ML/LLaDA-8B-Instruct
+Method:              graph_aware_v2
+Dataset:             openai/gsm8k
+Limit:               440
+Config:              {'gen_length': 256, 'block_length': 128, 'temperature': 0.0, 'mask_id': 126336, 'early_commit_ratio': 0.25, 'cascade_start_ratio': 0.3, 'cascade_full_ratio': 0.5, 'confidence_high': 0.7, 'confidence_low': 0.4, 'attention_threshold': 0.15, 'temporal_decay_strong': 1.0, 'temporal_decay_base': 0.5, 'remask_budget': 8, 'cooldown_period': 3, 'protect_symbols': True, 'tokenizer': None}
+Output:              results/20260121_100225/gsm8k_graph_aware_v2_shard1.jsonl
+============================================================
+
+✓ 샤드 1/3: 440개 샘플 (전체 1319개 중 0~440)
+
+
+============================================================
+Configuration Overrides Applied:
+============================================================
+  block_length: 128
+============================================================
+
+
+============================================================
+Eval GSM8K (graph_aware_v2)
+Model:               GSAI-ML/LLaDA-8B-Instruct
+Method:              graph_aware_v2
+Dataset:             openai/gsm8k
+Limit:               440
+Config:              {'gen_length': 256, 'block_length': 128, 'temperature': 0.0, 'mask_id': 126336, 'early_commit_ratio': 0.25, 'cascade_start_ratio': 0.3, 'cascade_full_ratio': 0.5, 'confidence_high': 0.7, 'confidence_low': 0.4, 'attention_threshold': 0.15, 'temporal_decay_strong': 1.0, 'temporal_decay_base': 0.5, 'remask_budget': 8, 'cooldown_period': 3, 'protect_symbols': True, 'tokenizer': None}
+Output:              results/20260121_100225/gsm8k_graph_aware_v2_shard0.jsonl
+============================================================
+
+[Shard 2] [20/439] Accuracy: 95.00% (19/20)
+[Shard 1] [20/440] Accuracy: 70.00% (14/20)
+[Shard 0] [20/440] Accuracy: 50.00% (10/20)
+[Shard 2] [40/439] Accuracy: 92.50% (37/40)
+[Shard 1] [40/440] Accuracy: 82.50% (33/40)
+[Shard 0] [40/440] Accuracy: 55.00% (22/40)
+[Shard 1] [60/440] Accuracy: 81.67% (49/60)
+[Shard 2] [60/439] Accuracy: 88.33% (53/60)
+[Shard 0] [60/440] Accuracy: 65.00% (39/60)
+[Shard 1] [80/440] Accuracy: 78.75% (63/80)
+[Shard 2] [80/439] Accuracy: 85.00% (68/80)
+[Shard 0] [80/440] Accuracy: 66.25% (53/80)
+[Shard 1] [100/440] Accuracy: 77.00% (77/100)
+[Shard 0] [100/440] Accuracy: 68.00% (68/100)
+[Shard 2] [100/439] Accuracy: 83.00% (83/100)
+[Shard 1] [120/440] Accuracy: 76.67% (92/120)
+[Shard 0] [120/440] Accuracy: 68.33% (82/120)
+[Shard 2] [120/439] Accuracy: 80.83% (97/120)
+[Shard 1] [140/440] Accuracy: 77.14% (108/140)
+[Shard 0] [140/440] Accuracy: 70.00% (98/140)
+[Shard 2] [140/439] Accuracy: 80.71% (113/140)
+[Shard 1] [160/440] Accuracy: 74.38% (119/160)
+[Shard 0] [160/440] Accuracy: 69.38% (111/160)
+[Shard 2] [160/439] Accuracy: 80.00% (128/160)
+[Shard 1] [180/440] Accuracy: 72.22% (130/180)
+[Shard 0] [180/440] Accuracy: 70.00% (126/180)
+[Shard 2] [180/439] Accuracy: 77.22% (139/180)
+[Shard 1] [200/440] Accuracy: 73.00% (146/200)
+[Shard 1] [220/440] Accuracy: 72.73% (160/220)
+[Shard 0] [200/440] Accuracy: 71.50% (143/200)
+[Shard 2] [200/439] Accuracy: 76.50% (153/200)
+[Shard 0] [220/440] Accuracy: 71.82% (158/220)
+[Shard 2] [220/439] Accuracy: 76.36% (168/220)
+[Shard 1] [240/440] Accuracy: 73.33% (176/240)
+[Shard 0] [240/440] Accuracy: 71.67% (172/240)
+[Shard 2] [240/439] Accuracy: 75.83% (182/240)
+[Shard 1] [260/440] Accuracy: 73.85% (192/260)
+[Shard 0] [260/440] Accuracy: 72.69% (189/260)
+[Shard 1] [280/440] Accuracy: 73.21% (205/280)
+[Shard 2] [260/439] Accuracy: 76.15% (198/260)
+[Shard 0] [280/440] Accuracy: 73.57% (206/280)
+[Shard 1] [300/440] Accuracy: 73.67% (221/300)
+[Shard 2] [280/439] Accuracy: 75.71% (212/280)
+[Shard 0] [300/440] Accuracy: 74.00% (222/300)
+[Shard 1] [320/440] Accuracy: 73.12% (234/320)
+[Shard 2] [300/439] Accuracy: 76.00% (228/300)
+[Shard 0] [320/440] Accuracy: 74.38% (238/320)
+[Shard 1] [340/440] Accuracy: 73.24% (249/340)
+[Shard 2] [320/439] Accuracy: 74.69% (239/320)
+[Shard 0] [340/440] Accuracy: 74.12% (252/340)
+[Shard 1] [360/440] Accuracy: 73.06% (263/360)
+[Shard 2] [340/439] Accuracy: 73.82% (251/340)
+[Shard 0] [360/440] Accuracy: 74.17% (267/360)
+[Shard 1] [380/440] Accuracy: 73.16% (278/380)
+[Shard 2] [360/439] Accuracy: 74.72% (269/360)
+[Shard 0] [380/440] Accuracy: 74.47% (283/380)
+[Shard 1] [400/440] Accuracy: 72.75% (291/400)
+[Shard 2] [380/439] Accuracy: 74.74% (284/380)
+[Shard 0] [400/440] Accuracy: 75.00% (300/400)
+[Shard 1] [420/440] Accuracy: 72.62% (305/420)
+[Shard 2] [400/439] Accuracy: 74.25% (297/400)
+[Shard 0] [420/440] Accuracy: 74.29% (312/420)
+[Shard 1] [440/440] Accuracy: 72.95% (321/440)
+
+============================================================
+Results saved to: results/20260121_100225/gsm8k_graph_aware_v2_shard1.jsonl
+Accuracy: 72.95% (321/440)
+Average NFE: 43.43
+============================================================
+
+샤드 모드: 요약은 병합 시 생성됩니다.
+
+
+============================================================
+모든 실험 완료!
+============================================================
+============================================================
+
+✓ [GPU 1] Completed: graph_aware_v2@gsm8k chunk1/3 (130.2m)
+[Shard 2] [420/439] Accuracy: 74.29% (312/420)
+[Shard 0] [440/440] Accuracy: 74.32% (327/440)
+
+============================================================
+Results saved to: results/20260121_100225/gsm8k_graph_aware_v2_shard0.jsonl
+Accuracy: 74.32% (327/440)
+Average NFE: 44.46
+============================================================
+
+샤드 모드: 요약은 병합 시 생성됩니다.
+
+
+============================================================
+모든 실험 완료!
+============================================================
+============================================================
+
+✓ [GPU 0] Completed: graph_aware_v2@gsm8k chunk0/3 (137.2m)
+
+============================================================
+Results saved to: results/20260121_100225/gsm8k_graph_aware_v2_shard2.jsonl
+Accuracy: 74.26% (326/439)
+Average NFE: 45.26
+============================================================
+
+샤드 모드: 요약은 병합 시 생성됩니다.
+
+
+============================================================
+모든 실험 완료!
+============================================================
+============================================================
+
+✓ [GPU 2] Completed: graph_aware_v2@gsm8k chunk2/3 (139.1m)
+
+청크 결과 병합 중...
+✓ Merged 3 chunks for graph_aware_v2@gsm8k: 974/1319 correct
+
+============================================================
+실험 완료
+============================================================
+Total chunks: 3
+Success: 3/3
+============================================================
+
+
+==========================================
+실험 완료
+==========================================
