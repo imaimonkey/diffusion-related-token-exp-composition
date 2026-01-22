@@ -26,11 +26,16 @@ DATASETS=("openai/gsm8k")
 METHODS=("graph_aware_sg_ga")
 NUM_SAMPLES=""
 
-# Override Config: Block Length=128 (기본 실험 구조 준수)
-# Confidence Threshold는 코드 기본값(0.5) 사용 (WINO와 baseline 일치)
-# OVERRIDE_CONFIG='{"block_length": 128}'
-
-OVERRIDE_CONFIG='{"block_length":128,"min_loop_step_for_remask":3,"min_remask_priority":0.02,"numeric_min_remask_priority":0.2,"max_remasks_per_pos":2}'
+# Override Config (재현성 위해 knobs 명시)
+# - block_length: 비교 기준(보통 128)
+# - min_loop_step_for_remask: 초반 remask 지연(진동 감소)
+# - min_remask_priority: 낮은 신호 remask 차단
+# - numeric_min_remask_priority: 숫자/연산자 remask를 더 보수적으로
+# - remask_cooldown_period(+numeric_*): 동일 위치 반복 remask 억제
+# - max_remasks_per_pos: 위치별 remask 상한
+# - hop2_decay: cascade_depth=2에서 2-hop 연관성 감쇠(과도 확장 방지)
+# - max_total_remasks: 샘플당 과도 remask(thrashing) 하드 컷(선택)
+OVERRIDE_CONFIG='{"block_length":128,"min_loop_step_for_remask":3,"min_remask_priority":0.02,"numeric_min_remask_priority":0.2,"remask_cooldown_period":3,"numeric_remask_cooldown_period":3,"max_remasks_per_pos":2,"hop2_decay":0.8,"max_total_remasks":120}'
 # ============================================================================
 # 실행
 # ============================================================================

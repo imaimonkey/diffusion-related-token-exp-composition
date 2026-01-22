@@ -1427,6 +1427,19 @@ def _decoding_sg_ga_impl(
     min_loop_step_for_remask = int(kwargs.get("min_loop_step_for_remask", 1))
     min_remask_priority = float(kwargs.get("min_remask_priority", 0.0))
     numeric_min_remask_priority = float(kwargs.get("numeric_min_remask_priority", 0.0))
+    hop2_decay = float(kwargs.get("hop2_decay", 0.8))
+    remask_cooldown_period = int(kwargs.get("remask_cooldown_period", 3))
+    numeric_remask_cooldown_period = int(kwargs.get("numeric_remask_cooldown_period", remask_cooldown_period))
+    max_total_remasks = kwargs.get("max_total_remasks", None)
+    if max_total_remasks is not None:
+        max_total_remasks = int(max_total_remasks)
+    protect_symbols = bool(kwargs.get("protect_symbols", False))
+    remask_confidence_protect = kwargs.get("remask_confidence_protect", None)
+    if remask_confidence_protect is not None:
+        remask_confidence_protect = float(remask_confidence_protect)
+    numeric_remask_confidence_protect = kwargs.get("numeric_remask_confidence_protect", None)
+    if numeric_remask_confidence_protect is not None:
+        numeric_remask_confidence_protect = float(numeric_remask_confidence_protect)
     max_remasks_per_pos = kwargs.get("max_remasks_per_pos", None)
     if max_remasks_per_pos is not None:
         max_remasks_per_pos = int(max_remasks_per_pos)
@@ -1473,6 +1486,13 @@ def _decoding_sg_ga_impl(
                 "min_loop_step_for_remask": int(min_loop_step_for_remask),
                 "min_remask_priority": float(min_remask_priority),
                 "numeric_min_remask_priority": float(numeric_min_remask_priority),
+                "hop2_decay": float(hop2_decay),
+                "remask_cooldown_period": int(remask_cooldown_period),
+                "numeric_remask_cooldown_period": int(numeric_remask_cooldown_period),
+                "max_total_remasks": max_total_remasks,
+                "protect_symbols": bool(protect_symbols),
+                "remask_confidence_protect": remask_confidence_protect,
+                "numeric_remask_confidence_protect": numeric_remask_confidence_protect,
                 "max_remasks_per_pos": max_remasks_per_pos,
             },
         })
@@ -1498,12 +1518,15 @@ def _decoding_sg_ga_impl(
     for num_block in range(num_blocks):
         block_start = prompt.shape[1] + num_block * block_length
         block_end = block_start + block_length
+        # Important: remasking can affect earlier blocks. Ensure the whole prefix up to block_end is fully filled
+        # before moving on to the next block, otherwise we can exit with stray [MASK] tokens left behind.
         block_mask_index = (x[:, block_start:block_end] == mask_id)
+        prefix_mask_index = (x[:, :block_end] == mask_id)
         
         loop_step = 0
         max_loop_steps = 100 # Increased to 100 to match WINO's NFE distribution (Avg ~48)
         
-        while block_mask_index.any():
+        while prefix_mask_index.any():
             masked_before = int(block_mask_index.sum().item())
             current_step += 1
             loop_step += 1
@@ -1630,6 +1653,8 @@ def _decoding_sg_ga_impl(
             effective_budgets = {}
             step_remasked = []
 
+            if max_total_remasks is not None and total_remask_count >= max_total_remasks:
+                force_convergence = True
             if cascade_depth > 0 and not force_convergence and loop_step >= min_loop_step_for_remask:
                 batch_entropy = compute_entropy(logits_curr) # [B, L]
                 # Hidden states are already normalized in compute_hidden_representation
@@ -1675,33 +1700,58 @@ def _decoding_sg_ga_impl(
                     src_scores = normalized_scores[b, source_indices]
                     tgt_scores = normalized_scores[b, target_indices]
                     
-                    # Sim [N_source, N_target]
-                    # OPTIMIZATION 3: Sparse Graph (Remove .abs())
+                    # Hop-1 similarities: newly unmasked -> existing tokens
                     # Only allow positive correlations to trigger remasking
-                    sim_matrix = torch.mm(src_scores, tgt_scores.t())
-                    
-                    # Find connections > threshold
-                    # We want max priority for each target from any source
-                    max_sim_per_target, _ = sim_matrix.max(dim=0) # [N_target]
-                    
-                    # Filter & Compute Priority
-                    # Priority = Edge(Sim) * Entropy
-                    
+                    sim1 = torch.mm(src_scores, tgt_scores.t())
+                    max_sim1, _ = sim1.max(dim=0)  # [N_target]
+
                     current_entropies = batch_entropy[b, target_indices]
-                    priorities = max_sim_per_target * current_entropies
-                    
-                    # Identify candidates
-                    mask = (max_sim_per_target > graph_threshold)
-                    
+
+                    # Hop-2 expansion (makes cascade_depth meaningful): candidates connected via hop-1 become new sources
+                    sim_score = max_sim1.clone()
+                    hop = torch.ones_like(sim_score, dtype=torch.long)
+                    cand1_mask = max_sim1 > graph_threshold
+                    cand2_count = 0
+                    if cascade_depth >= 2 and cand1_mask.any():
+                        cand1_indices = target_indices[cand1_mask]
+                        remaining_mask = ~cand1_mask
+                        remaining_indices = target_indices[remaining_mask]
+                        if cand1_indices.numel() > 0 and remaining_indices.numel() > 0:
+                            src2 = normalized_scores[b, cand1_indices]
+                            tgt2 = normalized_scores[b, remaining_indices]
+                            sim2 = torch.mm(src2, tgt2.t())
+                            max_sim2, _ = sim2.max(dim=0)  # [N_remaining]
+                            cand2_mask_local = max_sim2 > graph_threshold
+                            cand2_count = int(cand2_mask_local.sum().item())
+                            # apply depth decay so hop-2 is weaker than hop-1
+                            max_sim2 = max_sim2 * hop2_decay
+
+                            # update sim_score/hop for remaining targets if hop-2 gives stronger link
+                            sim_score_remaining = sim_score[remaining_mask]
+                            improved = max_sim2 > sim_score_remaining
+                            sim_score_remaining = torch.where(improved, max_sim2, sim_score_remaining)
+                            hop_remaining = hop[remaining_mask]
+                            hop_remaining = torch.where(improved, torch.full_like(hop_remaining, 2), hop_remaining)
+
+                            sim_score[remaining_mask] = sim_score_remaining
+                            hop[remaining_mask] = hop_remaining
+
+                    priorities = sim_score * current_entropies
+
+                    # Identify candidates (any hop) by score threshold on the (possibly hop-2 decayed) similarity
+                    mask = sim_score > graph_threshold
                     valid_cands_indices = torch.where(mask)[0]
+
                     if len(existing_gen_tokens) > 0 and len(unmasked_this) > 0:
                         try:
                             graph_stats[b] = {
                                 "sources": int(len(unmasked_this)),
                                 "targets": int(len(existing_gen_tokens)),
                                 "candidates": int(valid_cands_indices.numel()),
-                                "max_sim_mean": float(max_sim_per_target.mean().item()),
-                                "max_sim_max": float(max_sim_per_target.max().item()),
+                                "candidates_hop1": int(cand1_mask.sum().item()),
+                                "candidates_hop2": int(cand2_count),
+                                "max_sim1_mean": float(max_sim1.mean().item()),
+                                "max_sim1_max": float(max_sim1.max().item()),
                                 "entropy_mean_targets": float(current_entropies.mean().item()),
                                 "entropy_max_targets": float(current_entropies.max().item()),
                             }
@@ -1710,21 +1760,25 @@ def _decoding_sg_ga_impl(
                                 "sources": int(len(unmasked_this)),
                                 "targets": int(len(existing_gen_tokens)),
                                 "candidates": int(valid_cands_indices.numel()),
+                                "candidates_hop1": int(cand1_mask.sum().item()),
+                                "candidates_hop2": int(cand2_count),
                             }
+
                     for idx in valid_cands_indices:
                         pos = existing_gen_tokens[idx.item()]
                         prio = priorities[idx].item()
-                        sim = max_sim_per_target[idx].item()
+                        sim = sim_score[idx].item()
                         ent = current_entropies[idx].item()
-                        remask_requests.append((b, pos, prio, sim, ent))
+                        hop_k = int(hop[idx].item())
+                        remask_requests.append((b, pos, prio, sim, ent, hop_k))
                         step_remask_requested += 1
                         
                 # Sort globally or per batch? Per batch usually.
                 # Let's process per batch
                 requests_by_batch = {}
-                for b, pos, prio, sim, ent in remask_requests:
+                for b, pos, prio, sim, ent, hop_k in remask_requests:
                     if b not in requests_by_batch: requests_by_batch[b] = []
-                    requests_by_batch[b].append((pos, prio, sim, ent))
+                    requests_by_batch[b].append((pos, prio, sim, ent, hop_k))
                 
                 for b in requests_by_batch:
                     cands = sorted(requests_by_batch[b], key=lambda i: i[1], reverse=True)
@@ -1738,17 +1792,11 @@ def _decoding_sg_ga_impl(
                     effective_budgets[int(b)] = int(effective_budget)
 
                     applied_count = 0
-                    for pos, prio, sim, ent in cands:
+                    for pos, prio, sim, ent, hop_k in cands:
                         if applied_count >= effective_budget: break
                         if min_remask_priority > 0.0 and prio < min_remask_priority:
                             break
-                        
-                        # Cooldown Check (e.g., 3 steps)
-                        last_remask = remask_cooldown.get((b, pos), -999)
-                        if current_step - last_remask < 3:
-                            step_remask_skipped_cooldown += 1
-                            continue
-                            
+
                         if x[b, pos] != mask_id:
                             token_id_before = int(x[b, pos].item())
                             token_str = None
@@ -1758,12 +1806,39 @@ def _decoding_sg_ga_impl(
                                 except Exception:
                                     token_str = None
 
-                            if numeric_min_remask_priority > 0.0 and tokenizer is not None:
+                            is_numeric = False
+                            if tokenizer is not None:
                                 try:
-                                    if is_numeric_or_operator(token_id_before, tokenizer) and prio < numeric_min_remask_priority:
-                                        continue
+                                    is_numeric = is_numeric_or_operator(token_id_before, tokenizer)
                                 except Exception:
-                                    pass
+                                    is_numeric = False
+
+                            if protect_symbols and is_numeric:
+                                continue
+
+                            # Cooldown Check
+                            cooldown_required = numeric_remask_cooldown_period if is_numeric else remask_cooldown_period
+                            last_remask = remask_cooldown.get((b, pos), -999)
+                            if current_step - last_remask < cooldown_required:
+                                step_remask_skipped_cooldown += 1
+                                continue
+
+                            # Confidence-based protection for already-committed token
+                            # Uses probability of current token under current logits.
+                            if remask_confidence_protect is not None or (is_numeric and numeric_remask_confidence_protect is not None):
+                                try:
+                                    token_conf = float(p[b, pos, token_id_before].item())
+                                except Exception:
+                                    token_conf = None
+                                if token_conf is not None:
+                                    if is_numeric and numeric_remask_confidence_protect is not None and token_conf >= numeric_remask_confidence_protect:
+                                        continue
+                                    if remask_confidence_protect is not None and token_conf >= remask_confidence_protect:
+                                        continue
+
+                            if numeric_min_remask_priority > 0.0 and tokenizer is not None:
+                                if is_numeric and prio < numeric_min_remask_priority:
+                                    continue
 
                             if max_remasks_per_pos is not None and remask_counts_by_pos.get((b, pos), 0) >= max_remasks_per_pos:
                                 continue
@@ -1785,6 +1860,7 @@ def _decoding_sg_ga_impl(
                                 "priority": float(prio),
                                 "sim": float(sim),
                                 "entropy": float(ent),
+                                "hop": int(hop_k),
                                 "token_id_before": int(token_id_before),
                                 "effective_budget": int(effective_budget),
                             }
@@ -1796,6 +1872,7 @@ def _decoding_sg_ga_impl(
 
             # Update block mask index
             block_mask_index = (x[:, block_start:block_end] == mask_id)
+            prefix_mask_index = (x[:, :block_end] == mask_id)
             masked_after = int(block_mask_index.sum().item())
 
             if trace_enabled:
@@ -1817,6 +1894,13 @@ def _decoding_sg_ga_impl(
                         "min_loop_step_for_remask": int(min_loop_step_for_remask),
                         "min_remask_priority": float(min_remask_priority),
                         "numeric_min_remask_priority": float(numeric_min_remask_priority),
+                        "hop2_decay": float(hop2_decay),
+                        "remask_cooldown_period": int(remask_cooldown_period),
+                        "numeric_remask_cooldown_period": int(numeric_remask_cooldown_period),
+                        "max_total_remasks": max_total_remasks,
+                        "protect_symbols": bool(protect_symbols),
+                        "remask_confidence_protect": remask_confidence_protect,
+                        "numeric_remask_confidence_protect": numeric_remask_confidence_protect,
                     },
                     "metrics": {
                         "curvature": float(curvature),

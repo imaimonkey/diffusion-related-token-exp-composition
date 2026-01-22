@@ -52,7 +52,12 @@ def iter_trace_records(trace_path: Path):
         for line in f:
             if not line.strip():
                 continue
-            yield json.loads(line)
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                # Trace files can rarely contain a truncated final line if a job terminates mid-write.
+                # Skip malformed records to keep analysis robust.
+                continue
 
 
 def analyze_run(run_dir: Path):
@@ -159,4 +164,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
