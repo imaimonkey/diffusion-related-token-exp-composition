@@ -1412,16 +1412,24 @@ def decoding_graph_aware_sg_ga(
         shard_id=shard_id,
         global_index=global_index,
         tokenizer=tokenizer,
+        **kwargs,
     )
 
 def _decoding_sg_ga_impl(
     model, prompt, gen_length, block_length, temperature, mask_id,
     alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold=0.75,
-    trace_log_path=None, sample_id=None, shard_id=None, global_index=None, tokenizer=None
+    trace_log_path=None, sample_id=None, shard_id=None, global_index=None, tokenizer=None, **kwargs
 ):
     device = model.device
     batch_size = prompt.shape[0]
     prompt_len = prompt.shape[1]
+
+    min_loop_step_for_remask = int(kwargs.get("min_loop_step_for_remask", 1))
+    min_remask_priority = float(kwargs.get("min_remask_priority", 0.0))
+    numeric_min_remask_priority = float(kwargs.get("numeric_min_remask_priority", 0.0))
+    max_remasks_per_pos = kwargs.get("max_remasks_per_pos", None)
+    if max_remasks_per_pos is not None:
+        max_remasks_per_pos = int(max_remasks_per_pos)
 
     trace_enabled = bool(trace_log_path)
     if trace_enabled:
@@ -1462,6 +1470,10 @@ def _decoding_sg_ga_impl(
                 "max_budget": int(max_budget),
                 "graph_threshold": float(graph_threshold),
                 "confidence_threshold": float(confidence_threshold),
+                "min_loop_step_for_remask": int(min_loop_step_for_remask),
+                "min_remask_priority": float(min_remask_priority),
+                "numeric_min_remask_priority": float(numeric_min_remask_priority),
+                "max_remasks_per_pos": max_remasks_per_pos,
             },
         })
 
@@ -1618,7 +1630,7 @@ def _decoding_sg_ga_impl(
             effective_budgets = {}
             step_remasked = []
 
-            if cascade_depth > 0 and not force_convergence:
+            if cascade_depth > 0 and not force_convergence and loop_step >= min_loop_step_for_remask:
                 batch_entropy = compute_entropy(logits_curr) # [B, L]
                 # Hidden states are already normalized in compute_hidden_representation
                 normalized_scores = hidden_states 
@@ -1728,6 +1740,8 @@ def _decoding_sg_ga_impl(
                     applied_count = 0
                     for pos, prio, sim, ent in cands:
                         if applied_count >= effective_budget: break
+                        if min_remask_priority > 0.0 and prio < min_remask_priority:
+                            break
                         
                         # Cooldown Check (e.g., 3 steps)
                         last_remask = remask_cooldown.get((b, pos), -999)
@@ -1743,6 +1757,16 @@ def _decoding_sg_ga_impl(
                                     token_str = tokenizer.decode([token_id_before])
                                 except Exception:
                                     token_str = None
+
+                            if numeric_min_remask_priority > 0.0 and tokenizer is not None:
+                                try:
+                                    if is_numeric_or_operator(token_id_before, tokenizer) and prio < numeric_min_remask_priority:
+                                        continue
+                                except Exception:
+                                    pass
+
+                            if max_remasks_per_pos is not None and remask_counts_by_pos.get((b, pos), 0) >= max_remasks_per_pos:
+                                continue
 
                             x[b, pos] = mask_id
                             if (b, pos) in generation_history:
@@ -1790,6 +1814,9 @@ def _decoding_sg_ga_impl(
                     "thresholds": {
                         "confidence_unmask": float(current_conf_thresh),
                         "graph_threshold": float(graph_threshold),
+                        "min_loop_step_for_remask": int(min_loop_step_for_remask),
+                        "min_remask_priority": float(min_remask_priority),
+                        "numeric_min_remask_priority": float(numeric_min_remask_priority),
                     },
                     "metrics": {
                         "curvature": float(curvature),

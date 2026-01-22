@@ -28,8 +28,9 @@ NUM_SAMPLES=""
 
 # Override Config: Block Length=128 (기본 실험 구조 준수)
 # Confidence Threshold는 코드 기본값(0.5) 사용 (WINO와 baseline 일치)
-OVERRIDE_CONFIG='{"block_length": 128}'
+# OVERRIDE_CONFIG='{"block_length": 128}'
 
+OVERRIDE_CONFIG='{"block_length":128,"min_loop_step_for_remask":3,"min_remask_priority":0.02,"numeric_min_remask_priority":0.2,"max_remasks_per_pos":2}'
 # ============================================================================
 # 실행
 # ============================================================================
