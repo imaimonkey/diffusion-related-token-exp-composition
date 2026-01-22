@@ -2,7 +2,7 @@
 #SBATCH --job-name=eval_rc
 #SBATCH --output=logs/eval_rc_%j.out
 #SBATCH --error=logs/eval_rc_%j.err
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:6
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=12:00:00

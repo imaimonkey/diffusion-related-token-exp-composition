@@ -1393,6 +1393,7 @@ def decoding_graph_aware_sg_ga(
     trace_log_path: str = None,
     sample_id: int = None,
     shard_id: int = None,
+    tokenizer=None,
     **kwargs
 ) -> Tuple[torch.Tensor, int]:
     """
@@ -1404,183 +1405,14 @@ def decoding_graph_aware_sg_ga(
     # Delegate immediately to implementation to avoid duplicate code name error
     return _decoding_sg_ga_impl(
         model, prompt, gen_length, block_length, temperature, mask_id,
-        alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold
-    )
-    
-    print(f"[SG-GA] Function called. Gen Length: {gen_length}", flush=True)
-    device = model.device
-    batch_size = prompt.shape[0]
-    
-    print(f"[SG-GA] Allocation tensor on {device}...", flush=True)
-    x = torch.full((batch_size, prompt.shape[1] + gen_length), mask_id, dtype=torch.long, device=device)
-    x[:, :prompt.shape[1]] = prompt.clone()
-    print(f"[SG-GA] Tensor allocated.", flush=True)
-    
-    generation_history = {}
-    current_step = 0
-    prev_score_vectors = None
-    
-    # Block-wise generation setup
-    assert gen_length % block_length == 0
-    num_blocks = gen_length // block_length
-    print(f"[SG-GA] Starting block loop. Num blocks: {num_blocks}", flush=True)
-
-    for num_block in range(num_blocks):
-        print(f"[SG-GA] Processing Block {num_block}", flush=True)
-        block_start = prompt.shape[1] + num_block * block_length
-        block_end = block_start + block_length
-        block_mask_index = (x[:, block_start:block_end] == mask_id)
-        
-        while block_mask_index.any():
-            current_step += 1
-            
-            # 1. Forward Pass & Unmasking (Standard)
-            with torch.enable_grad(): # Enable grad only for score computation logic if integrated, but here we separate
-                # Standard inference (no grad needed)
-                logits = model(x).logits
-            
-            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            x0 = torch.argmax(logits_with_noise, dim=-1)
-            
-            # Unmasking logic (similar to standard)
-            p = F.softmax(logits.to(torch.float64), dim=-1)
-            x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
-            
-            mask_index = (x == mask_id)
-            mask_index[:, block_end:] = False # Only unmask current block
-            
-            # Simple confidence-based unmasking (can be replaced by score-based unmasking later)
-            # Keeping WINO-like unmasking for fairness/baseline
-            confidence = torch.where(mask_index, x0_p, -np.inf)
-            # Dynamic threshold could be applied here too, but using heuristic 0.5 for unmasking to match others
-            high_conf_mask = (confidence > 0.5) & mask_index
-            
-            if high_conf_mask.sum() == 0:
-                max_conf_pos = confidence.argmax(dim=1)
-                for b in range(batch_size):
-                    high_conf_mask[b, max_conf_pos[b]] = True
-            
-            # Record newly unmasked
-            newly_unmasked = []
-            for b in range(batch_size):
-                newly_unmasked.append(torch.where(high_conf_mask[b])[0].tolist())
-            
-            x[high_conf_mask] = x0[high_conf_mask]
-            
-            # Update history
-            for b in range(batch_size):
-                for pos in newly_unmasked[b]:
-                    generation_history[pos] = current_step
-
-            # ==========================================
-            # SG-GA Step: Theoretical Refinement
-            # ==========================================
-            
-            # 2. Compute Theoretical Metrics (Hidden State based)
-            # Replaced Autograd with Hidden States to prevent Deadlock/Hang
-            with torch.no_grad():
-                # Get hidden states (Feature Representation)
-                hidden_states, logits_curr = compute_hidden_representation(model, x)
-            
-            # 3. Dynamic Cascade Depth from Curvature
-            curvature = compute_curvature(hidden_states, prev_score_vectors)
-            prev_score_vectors = hidden_states.detach() # naming kept for compat, but holds hidden
-            
-            # Curvature-based cascade depth
-            current_cascade_depth = 0
-            if curvature >= tau_high:
-                current_cascade_depth = 2
-            elif curvature >= tau_low:
-                current_cascade_depth = 1
-            
-            # 4. Dynamic Budget from Entropy/Curvature
-            step_decay = max(0.0, 1.0 - (loop_step * 0.2)) 
-            current_budget = compute_entropy_budget(logits_curr, alpha, min_budget, max_budget,
-                                                  curvature=curvature, step_decay=step_decay)
-            
-            # 5. Build Graph & Priority (if cascading needed)
-            # 5. Build Graph & Priority (if cascading needed)
-            if current_cascade_depth > 0:
-                batch_entropy = compute_entropy(logits_curr)
-                
-                # Normalize scores for cosine similarity (already normalized in func, but safe check)
-                normalized_scores = hidden_states
-                
-                # We can't build full NxN graph easily (expensive). 
-                # We only check relations from `newly_unmasked` to others.
-                
-                remask_candidates = {} # pos -> priority
-                
-                for b in range(batch_size):
-                    # Candidates to check: existing generated tokens
-                    existing_tokens = [p for p in generation_history.keys() if x[b, p] != mask_id]
-                    
-                    unmasked_in_this_step = newly_unmasked[b]
-                    
-                    for i in unmasked_in_this_step:
-                        # Vectorized cosine similarity: i vs all existing
-                        if not existing_tokens: continue
-                        
-                        # i's score: [1, Dim]
-                        score_i = normalized_scores[b, i].unsqueeze(0)
-                        
-                        # Others scores: [N, Dim]
-                        others_indices = torch.tensor(existing_tokens, device=device)
-                        score_others = normalized_scores[b, others_indices]
-                        
-                        # Cosine sim: [1, N]
-                        cos_sims = torch.mm(score_i, score_others.t()).abs().squeeze(0)
-                        
-                        # Filter by threshold
-                        connected_indices = torch.where(cos_sims > graph_threshold)[0]
-                        
-                        for idx_in_indices in connected_indices:
-                            j = existing_tokens[idx_in_indices.item()]
-                            edge_weight = cos_sims[idx_in_indices].item()
-                            
-                            # Priority = Edge * Entropy
-                            entropy_j = batch_entropy[b, j].item()
-                            priority = edge_weight * entropy_j
-                            
-                            if j not in remask_candidates:
-                                remask_candidates[j] = priority
-                            else:
-                                remask_candidates[j] = max(remask_candidates[j], priority)
-                
-                # 6. Apply Remask with Budget
-                if remask_candidates:
-                    sorted_cands = sorted(remask_candidates.items(), key=lambda item: item[1], reverse=True)
-                    
-                    # Apply top-k
-                    count = 0
-                    for pos, prio in sorted_cands:
-                        if count >= current_budget:
-                            break
-                        # Do not remask highly confident ones? 
-                        # SG-GA implicitly handles this via entropy (low entropy -> low priority)
-                        # But we can add safety check if priority is too low
-                        
-                        if x[0, pos] != mask_id: # Simplify to batch 0 for now or handle batch properly
-                             # Note: remask_candidates logic above was mixed batch. 
-                             # Assuming batch=1 for typical generation or need to separate remask_candidates by batch
-                             # Let's handle batch=1 strictly or fix dict to be (b, pos) -> priority
-                             pass 
-                             
-                    # Start over for batch handling
-                    # Fix: remask_candidates should be per batch
-                    pass 
-
-    # Clean implementation for batch support
-    return _decoding_sg_ga_impl(
-        model, prompt, gen_length, block_length, temperature, mask_id,
         alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold,
-        trace_log_path=trace_log_path, sample_id=sample_id, shard_id=shard_id
+        trace_log_path=trace_log_path, sample_id=sample_id, shard_id=shard_id, tokenizer=tokenizer
     )
 
 def _decoding_sg_ga_impl(
     model, prompt, gen_length, block_length, temperature, mask_id,
     alpha, tau_low, tau_high, min_budget, max_budget, graph_threshold, confidence_threshold=0.75,
-    trace_log_path=None, sample_id=None, shard_id=None
+    trace_log_path=None, sample_id=None, shard_id=None, tokenizer=None
 ):
     device = model.device
     batch_size = prompt.shape[0]
@@ -1593,6 +1425,7 @@ def _decoding_sg_ga_impl(
     prev_score_vectors = None
     
     # Block-wise generation
+    assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
     
     # Safety: Cooldown to prevent oscillation
