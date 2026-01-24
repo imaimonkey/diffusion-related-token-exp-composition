@@ -2,7 +2,7 @@
 #SBATCH --job-name=sweep_ga_v2
 #SBATCH --output=logs/sweep_ga_v2_%j.out
 #SBATCH --error=logs/sweep_ga_v2_%j.err
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:6
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
@@ -109,8 +109,10 @@ echo "tag,status,accuracy,correct,total,avg_nfe,median_nfe" > "$CSV"
 # Baseline
 run_case "baseline" "{}"
 
-# 1) Attention threshold (특히 attention 추출 실패 시, 매우 낮은 값에서만 효과가 나타날 수 있음)
-for v in 0.005 0.01 0.02 0.05 0.10 0.15 0.20; do
+# 1) Attention threshold
+# - LLaDA는 attention이 mask 토큰에도 분산될 수 있어 scale이 ~1/seq_len로 작아지기 쉬움
+# - 따라서 1e-4~5e-3 구간도 같이 훑어야 그래프 엣지가 생기는지 확인 가능
+for v in 0.0001 0.0002 0.0005 0.001 0.002 0.003 0.005 0.01 0.02 0.05 0.10 0.15 0.20; do
   run_case "attn_${v}" "{\"attention_threshold\": ${v}}"
 done
 
@@ -168,4 +170,3 @@ if df_ok.empty:
 df_ok = df_ok.sort_values(["accuracy", "avg_nfe"], ascending=[False, True])
 print(df_ok.head(30).to_string(index=False))
 PY
-

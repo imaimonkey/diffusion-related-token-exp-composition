@@ -44,13 +44,15 @@ def extract_attention_influence(
         Attention weights [batch, seq_len, seq_len] or None if not available
     """
     try:
-        # 1. Try standard calling convention
+        # 1. Try standard calling convention (HF-style wrapper)
         try:
-            outputs = model(x, output_attentions=True)
+            outputs = model(x, output_attentions=True, return_dict=True)
             if hasattr(outputs, 'attentions') and outputs.attentions is not None:
-                attention = outputs.attentions[layer_idx]  # [batch, heads, seq, seq]
-                attention = attention.mean(dim=1)  # [batch, seq, seq]
-                return attention
+                layer_attn = outputs.attentions[layer_idx]
+                # Accept either (B, heads, T, S) or already-averaged (B, T, S).
+                if isinstance(layer_attn, torch.Tensor) and layer_attn.dim() == 4:
+                    return layer_attn.mean(dim=1)
+                return layer_attn
         except:
             pass
             
@@ -58,9 +60,10 @@ def extract_attention_influence(
         if hasattr(model, 'model'):
              outputs = model.model(x, output_attentions=True)
              if hasattr(outputs, 'attentions') and outputs.attentions is not None:
-                attention = outputs.attentions[layer_idx]
-                attention = attention.mean(dim=1)
-                return attention
+                layer_attn = outputs.attentions[layer_idx]
+                if isinstance(layer_attn, torch.Tensor) and layer_attn.dim() == 4:
+                    return layer_attn.mean(dim=1)
+                return layer_attn
                 
     except Exception as e:
         return None

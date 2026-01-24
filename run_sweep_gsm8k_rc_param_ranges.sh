@@ -123,8 +123,9 @@ for v in 0 1 3 5; do
   run_case "cooldown_${v}" "{\"cooldown_period\": ${v}}"
 done
 
-# 4) Secondary cascade filter: attention_threshold (attention 추출 실패 시 매우 낮은 값이 필요할 수 있음)
-for v in 0.005 0.01 0.02 0.05 0.10 0.15 0.20; do
+# 4) Secondary cascade filter: attention_threshold
+# - GA/RC 모두 절대 threshold 방식이라 attention scale이 작으면 그래프가 비기 쉬움
+for v in 0.0001 0.0002 0.0005 0.001 0.002 0.003 0.005 0.01 0.02 0.05 0.10 0.15 0.20; do
   run_case "attn_${v}" "{\"attention_threshold\": ${v}}"
 done
 
@@ -153,4 +154,3 @@ if df_ok.empty:
 df_ok = df_ok.sort_values(["accuracy", "avg_nfe"], ascending=[False, True])
 print(df_ok.head(30).to_string(index=False))
 PY
-
