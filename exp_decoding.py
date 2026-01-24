@@ -951,7 +951,13 @@ def decoding_graph_aware_v2(
                 # ------------------------------------------------------------------
                 attention = extract_attention_influence(model, x)
                 if attention is None:
+                    # [DEBUG] Logging for attention status
+                    if current_step % 10 == 0:  # Log periodically to avoid spam
+                        print(f"step={current_step} | Attention: FALLBACK (Uniform)")
                     attention = approximate_attention_uniform(x, generation_history)
+                else:
+                    if current_step % 10 == 0:
+                        print(f"step={current_step} | Attention: REAL (Graph-Aware)")
                 
                 # Build dependency graph
                 graph = build_dependency_graph(
